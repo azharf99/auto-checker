@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Login — Algonova Auto-Checker</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #1e293b;
+      --border: #334155;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+      --purple: #8b5cf6;
+      --purple-hover: #7c3aed;
+      --danger: #ef4657;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      background: radial-gradient(circle at top, #1e1b4b 0%, var(--bg) 60%);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .login-card {
+      width: 100%;
+      max-width: 410px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 32px 28px;
+      box-shadow: 0 20px 45px rgba(0, 0, 0, 0.45);
+    }
+    .brand {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+      margin-bottom: 24px;
+    }
+    .brand-logo {
+      width: 52px; height: 52px;
+      border-radius: 14px;
+      background: linear-gradient(135deg, #8b5cf6, #6366f1);
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 800; font-size: 24px; color: #fff;
+      margin-bottom: 12px;
+      box-shadow: 0 8px 20px rgba(139, 92, 246, 0.35);
+    }
+    .brand h1 { font-size: 20px; font-weight: 700; }
+    .brand p { font-size: 13px; color: var(--muted); margin-top: 4px; }
+    .form-group { margin-bottom: 16px; }
+    label {
+      display: block;
+      font-size: 12.5px;
+      color: var(--muted);
+      margin-bottom: 6px;
+      font-weight: 600;
+    }
+    input {
+      width: 100%;
+      padding: 11px 14px;
+      border-radius: 9px;
+      border: 1px solid var(--border);
+      background: #0f172a;
+      color: var(--text);
+      font-size: 14px;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    input:focus { border-color: var(--purple); }
+    button {
+      width: 100%;
+      padding: 12px;
+      border-radius: 9px;
+      border: none;
+      background: var(--purple);
+      color: #fff;
+      font-weight: 600;
+      font-size: 14.5px;
+      cursor: pointer;
+      transition: background 0.15s;
+      margin-top: 6px;
+    }
+    button:hover:not(:disabled) { background: var(--purple-hover); }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+    .error-msg {
+      display: none;
+      margin-bottom: 16px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      background: rgba(239, 70, 87, 0.15);
+      border: 1px solid var(--danger);
+      color: #fda4af;
+      font-size: 13px;
+      text-align: center;
+    }
+    .footer-note {
+      margin-top: 20px;
+      text-align: center;
+      font-size: 12px;
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+  <div class="login-card">
+    <div class="brand">
+      <div class="brand-logo">A</div>
+      <h1>Algonova Auto-Checker</h1>
+      <p>Silakan masuk untuk mengakses Dashboard Otomasi</p>
+    </div>
+
+    <div id="errorBox" class="error-msg"></div>
+
+    <form id="loginForm" onsubmit="handleLogin(event)">
+      <div class="form-group">
+        <label for="username">Username Admin / Guru</label>
+        <input type="text" id="username" name="username" required autocomplete="username" autofocus />
+      </div>
+      <div class="form-group">
+        <label for="password">Password</label>
+        <input type="password" id="password" name="password" required autocomplete="current-password" />
+      </div>
+      <button type="submit" id="btnSubmit">Masuk ke Dashboard</button>
+    </form>
+
+    <div class="footer-note">
+      Dilindungi oleh Bcrypt Auth &amp; SQLite Session Store
+    </div>
+  </div>
+
+  <script>
+    async function handleLogin(e) {
+      e.preventDefault();
+      const errBox = document.getElementById('errorBox');
+      const btn = document.getElementById('btnSubmit');
+      errBox.style.display = 'none';
+      btn.disabled = true;
+      btn.textContent = 'Memverifikasi...';
+
+      try {
+        const res = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            username: document.getElementById('username').value,
+            password: document.getElementById('password').value
+          })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          errBox.textContent = data.error || 'Login gagal';
+          errBox.style.display = 'block';
+          return;
+        }
+        window.location.href = '/';
+      } catch (err) {
+        errBox.textContent = 'Gagal menghubungi server: ' + err.message;
+        errBox.style.display = 'block';
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Masuk ke Dashboard';
+      }
+    }
+  </script>
+</body>
+</html>

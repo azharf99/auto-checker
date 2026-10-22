@@ -1,0 +1,609 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Algonova Auto-Checker Dashboard</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #1e293b;
+      --card-hover: #263449;
+      --border: #334155;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+      --yellow: #ffdc40;
+      --green: #2fd566;
+      --purple: #8b5cf6;
+      --purple-hover: #7c3aed;
+      --danger: #ef4657;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+      padding: 24px;
+    }
+    .container { max-width: 1320px; margin: 0 auto; }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 16px;
+      padding-bottom: 20px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 24px;
+    }
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .brand-logo {
+      width: 42px; height: 42px;
+      border-radius: 10px;
+      background: linear-gradient(135deg, #8b5cf6, #6366f1);
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 800; font-size: 20px; color: #fff;
+    }
+    .brand h1 { font-size: 22px; font-weight: 700; }
+    .brand p { font-size: 13px; color: var(--muted); }
+    .status-pills { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    .pill {
+      padding: 6px 14px;
+      border-radius: 999px;
+      font-size: 13px;
+      font-weight: 600;
+      border: 1px solid var(--border);
+      background: var(--card);
+      display: flex; align-items: center; gap: 8px;
+    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+    .dot.ok { background: var(--green); box-shadow: 0 0 8px var(--green); }
+    .dot.warn { background: var(--yellow); box-shadow: 0 0 8px var(--yellow); }
+
+    .grid-top {
+      display: grid;
+      grid-template-columns: 2fr 1fr;
+      gap: 20px;
+      margin-bottom: 24px;
+    }
+    @media (max-width: 960px) { .grid-top { grid-template-columns: 1fr; } }
+
+    .panel {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 20px;
+      margin-bottom: 24px;
+    }
+    .panel h2 {
+      font-size: 16px;
+      margin-bottom: 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+    .form-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 14px;
+      margin-bottom: 16px;
+    }
+    label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; font-weight: 600; }
+    input[type="text"], select {
+      width: 100%;
+      padding: 9px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: #0f172a;
+      color: var(--text);
+      font-size: 14px;
+    }
+    .checkbox-row {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 13px; color: var(--text);
+      margin-top: 8px;
+      cursor: pointer;
+    }
+    .btn-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    button {
+      padding: 9px 15px;
+      border-radius: 8px;
+      border: none;
+      font-weight: 600;
+      font-size: 13.5px;
+      cursor: pointer;
+      transition: all 0.15s;
+      display: inline-flex; align-items: center; gap: 8px;
+    }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-primary { background: var(--purple); color: #fff; }
+    .btn-primary:hover:not(:disabled) { background: var(--purple-hover); }
+    .btn-secondary { background: #334155; color: var(--text); }
+    .btn-secondary:hover:not(:disabled) { background: #475569; }
+    .btn-success { background: #16a34a; color: #fff; }
+    .btn-success:hover:not(:disabled) { background: #15803d; }
+    .btn-danger { background: rgba(239, 70, 87, 0.2); color: #fda4af; border: 1px solid var(--danger); padding: 6px 12px; font-size: 12.5px; }
+    .btn-danger:hover { background: var(--danger); color: #fff; }
+
+    .table-wrap { overflow-x: auto; margin-top: 12px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+    th, td {
+      padding: 12px 10px;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+    th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; }
+    tr:hover td { background: rgba(255,255,255,0.02); }
+
+    .level-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 26px; height: 26px;
+      border-radius: 6px;
+      font-weight: 700;
+      font-size: 13px;
+      background: var(--yellow);
+      color: #111827;
+      margin-right: 6px;
+    }
+    .level-badge.done { background: var(--green); color: #fff; }
+    a.ext-link { color: #a78bfa; text-decoration: none; font-weight: 500; }
+    a.ext-link:hover { text-decoration: underline; }
+    .sub-muted { font-size: 12px; color: var(--muted); margin-top: 2px; }
+    .obj-list { list-style: none; margin-top: 6px; }
+    .obj-list li {
+      font-size: 12px;
+      padding: 4px 8px;
+      margin-bottom: 4px;
+      border-radius: 6px;
+      background: rgba(15, 23, 42, 0.6);
+      border-left: 3px solid var(--yellow);
+    }
+    .obj-list li.checked-teacher { border-left-color: var(--green); }
+
+    .log-box {
+      background: #090d16;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      height: 210px;
+      overflow-y: auto;
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      font-size: 12px;
+      color: #cbd5e1;
+    }
+    .log-line { margin-bottom: 4px; }
+    .log-time { color: #64748b; margin-right: 6px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="brand">
+        <div class="brand-logo">A</div>
+        <div>
+          <h1>Algonova Auto-Checker</h1>
+          <p>Otomasi Checklist Tugas Kuning (SQLite + Auth Protected)</p>
+        </div>
+      </div>
+      <div class="status-pills">
+        <div class="pill">
+          <span id="authDot" class="dot"></span>
+          <span id="authText">Memeriksa sesi...</span>
+        </div>
+        <div class="pill">
+          <span>Global Unreviewed:</span>
+          <strong id="globalUnreviewedCount" style="color: var(--yellow);">-</strong>
+        </div>
+        <div class="pill">
+          <span id="cronDot" class="dot"></span>
+          <span id="cronStatusText">Scheduler: Off</span>
+        </div>
+        <div class="pill">
+          <span>User: <strong id="currentUser">-</strong></span>
+          <button class="btn-danger" onclick="logout()">Logout</button>
+        </div>
+      </div>
+    </header>
+
+    <div class="grid-top">
+      <div class="panel" style="margin-bottom:0;">
+        <h2>
+          <span>1. Pencarian Tugas Kuning (100% Read-Only Scan)</span>
+          <span id="scanSpinner" style="font-size:12px;color:var(--yellow);display:none;">Memindai LMS Algonova...</span>
+        </h2>
+        <div class="form-grid">
+          <div>
+            <label for="scanMode">Mode Discovery</label>
+            <select id="scanMode">
+              <option value="unreviewed">Shortcut API (/platform/api/v2/task/unreviewed-list)</option>
+              <option value="schedule">Halaman Jadwal -&gt; Grup -&gt; Tab Progress</option>
+              <option value="both">Keduanya (Gabungkan &amp; Deduplikasi)</option>
+            </select>
+          </div>
+          <div>
+            <label for="groupIds">Filter Group ID (Opsional, pisah koma)</label>
+            <input type="text" id="groupIds" placeholder="Kosongkan untuk semua grup" value="" />
+          </div>
+          <div>
+            <label for="timeframe">Rentang Jadwal (Mode Schedule)</label>
+            <select id="timeframe">
+              <option value="current">Minggu Ini (This week)</option>
+              <option value="all">Semua Jadwal Aktif (All)</option>
+              <option value="past">Minggu Lalu (Last week)</option>
+            </select>
+          </div>
+        </div>
+        <label class="checkbox-row" style="margin-bottom: 16px;">
+          <input type="checkbox" id="onlyScheduled" />
+          <span>Pada mode Shortcut API, batasi hanya untuk grup yang ada di jadwal aktif</span>
+        </label>
+        <div class="btn-row">
+          <button id="btnScan" class="btn-primary" onclick="runScan()">Scan Tugas Kuning (Read-Only)</button>
+          <button class="btn-secondary" onclick="refreshStatus()">Refresh Status &amp; Riwayat</button>
+          <button class="btn-secondary" onclick="promptUpdateCookie()">Update Cookie Algonova</button>
+        </div>
+      </div>
+
+      <div class="panel" style="margin-bottom:0;">
+        <h2>2. Built-in Cron Scheduler &amp; Log Aktivitas (SQLite)</h2>
+        <div style="display:flex; gap:10px; margin-bottom:10px; align-items:flex-end;">
+          <div style="flex:1;">
+            <label for="cronInterval">Interval Cek Otomatis</label>
+            <input type="text" id="cronInterval" value="6h" placeholder="Misal: 1h, 6h, 30m" />
+          </div>
+          <button id="btnToggleCron" class="btn-secondary" onclick="toggleScheduler()">Aktifkan Cron</button>
+        </div>
+        <label class="checkbox-row" style="margin-bottom:12px;">
+          <input type="checkbox" id="cronAutoExec" />
+          <span>Izinkan Cron otomatis mengeksekusi POST Approve (tanpa klik manual)</span>
+        </label>
+        <div id="logBox" class="log-box"></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>
+        <span>3. Daftar Tugas Kuning (student_success) — Ditemukan: <strong id="foundCount" style="color:var(--yellow)">0</strong> Level</span>
+        <div class="btn-row">
+          <button id="btnDryRunSelected" class="btn-secondary" onclick="executeSelected(true)" disabled>Simulasi Dry-Run Terpilih</button>
+          <button id="btnApproveSelected" class="btn-success" onclick="executeSelected(false)" disabled>Approve (Ceklis ✓) Terpilih</button>
+        </div>
+      </h2>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th style="width:36px;"><input type="checkbox" id="selectAll" onchange="toggleSelectAll(this.checked)" /></th>
+              <th>Grup &amp; Lesson</th>
+              <th>Siswa</th>
+              <th>Task &amp; Level Kuning</th>
+              <th>Pertanyaan / Objektif Guru (Hints)</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="tasksBody">
+            <tr>
+              <td colspan="6" style="text-align:center;color:var(--muted);padding:28px;">
+                Klik tombol <strong>"Scan Tugas Kuning (Read-Only)"</strong> di atas untuk memuat daftar tugas yang perlu diceklis.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>
+        <span>4. Riwayat Audit Eksekusi (Tersimpan Permanen di SQLite)</span>
+        <span style="font-size:12px;color:var(--muted);">Menampilkan 100 aktivitas checklist terakhir</span>
+      </h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Waktu</th>
+              <th>Mode</th>
+              <th>Grup</th>
+              <th>Siswa</th>
+              <th>Task &amp; Level</th>
+              <th>Objektif Diceklis</th>
+              <th>Hasil</th>
+            </tr>
+          </thead>
+          <tbody id="historyBody">
+            <tr>
+              <td colspan="7" style="text-align:center;color:var(--muted);padding:20px;">Memuat riwayat...</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let currentItems = [];
+    let cronEnabled = false;
+
+    async function apiFetch(url, options) {
+      const res = await fetch(url, options);
+      if (res.status === 401) {
+        window.location.href = '/login';
+        throw new Error('Sesi berakhir, mengalihkan ke halaman login...');
+      }
+      return res;
+    }
+
+    async function refreshStatus() {
+      try {
+        const res = await apiFetch('/api/status');
+        const data = await res.json();
+        document.getElementById('currentUser').textContent = data.currentUser || 'admin';
+        const dot = document.getElementById('authDot');
+        const txt = document.getElementById('authText');
+        if (data.authenticated) {
+          dot.className = 'dot ok';
+          txt.textContent = 'Sesi Algonova Aktif';
+        } else {
+          dot.className = 'dot warn';
+          txt.textContent = 'Algonova Perlu Login/Cookie';
+        }
+        document.getElementById('globalUnreviewedCount').textContent = data.unreviewedGlobalCount ?? '-';
+
+        cronEnabled = !!data.cronEnabled;
+        const cDot = document.getElementById('cronDot');
+        const cTxt = document.getElementById('cronStatusText');
+        const cBtn = document.getElementById('btnToggleCron');
+        if (cronEnabled) {
+          cDot.className = 'dot ok';
+          cTxt.textContent = 'Scheduler: Aktif (' + data.cronInterval + ')';
+          cBtn.textContent = 'Matikan Cron';
+        } else {
+          cDot.className = 'dot';
+          cTxt.textContent = 'Scheduler: Off';
+          cBtn.textContent = 'Aktifkan Cron';
+        }
+        if (data.cronInterval) document.getElementById('cronInterval').value = data.cronInterval;
+        document.getElementById('cronAutoExec').checked = !!data.cronAutoExec;
+
+        renderLogs(data.logs || []);
+        await loadHistory();
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    async function loadHistory() {
+      try {
+        const res = await apiFetch('/api/history');
+        const data = await res.json();
+        const items = data.history || [];
+        const tbody = document.getElementById('historyBody');
+        if (items.length === 0) {
+          tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:20px;">Belum ada riwayat eksekusi di database SQLite.</td></tr>`;
+          return;
+        }
+        tbody.innerHTML = items.map(h => `
+          <tr>
+            <td style="white-space:nowrap;font-size:12.5px;color:var(--muted);">${escapeHtml(h.checkedAt)}</td>
+            <td><span style="font-size:12px;font-weight:600;color:${h.dryRun ? 'var(--yellow)' : 'var(--green)'};">${h.dryRun ? 'DRY-RUN' : 'EXECUTE'}</span></td>
+            <td>${escapeHtml(h.groupTitle)} <span class="sub-muted">(#${h.groupId})</span></td>
+            <td><strong>${escapeHtml(h.studentName)}</strong> <span class="sub-muted">(#${h.studentId})</span></td>
+            <td>Task #${h.taskId} &bull; Level ${h.levelPosition} <span class="sub-muted">(ID: ${h.levelId})</span></td>
+            <td>${h.objectivesChecked} butir</td>
+            <td>
+              <span style="font-weight:600;color:${h.success ? 'var(--green)' : 'var(--danger)'};">
+                ${h.success ? 'BERHASIL' : ('GAGAL: ' + escapeHtml(h.error))}
+              </span>
+            </td>
+          </tr>
+        `).join('');
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    function renderLogs(logs) {
+      const box = document.getElementById('logBox');
+      box.innerHTML = logs.map(l =>
+        `<div class="log-line"><span class="log-time">[${escapeHtml(l.time)}]</span>${escapeHtml(l.message)}</div>`
+      ).join('');
+      box.scrollTop = box.scrollHeight;
+    }
+
+    async function runScan() {
+      const btn = document.getElementById('btnScan');
+      const spinner = document.getElementById('scanSpinner');
+      btn.disabled = true;
+      spinner.style.display = 'inline';
+
+      try {
+        const payload = {
+          mode: document.getElementById('scanMode').value,
+          groupIds: document.getElementById('groupIds').value,
+          timeframe: document.getElementById('timeframe').value,
+          onlyScheduled: document.getElementById('onlyScheduled').checked
+        };
+        const res = await apiFetch('/api/scan', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          alert('Gagal melakukan scan: ' + (data.error || res.statusText));
+          return;
+        }
+        currentItems = data.items || [];
+        renderTable();
+        await refreshStatus();
+      } catch (e) {
+        alert('Error: ' + e.message);
+      } finally {
+        btn.disabled = false;
+        spinner.style.display = 'none';
+      }
+    }
+
+    function renderTable() {
+      document.getElementById('foundCount').textContent = currentItems.length;
+      const tbody = document.getElementById('tasksBody');
+      if (currentItems.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:28px;">Tidak ditemukan tugas kuning (student_success) pada filter ini.</td></tr>`;
+        updateActionButtons();
+        return;
+      }
+
+      tbody.innerHTML = currentItems.map((it, idx) => {
+        const objsHtml = (it.objectives && it.objectives.length > 0)
+          ? `<ul class="obj-list">` + it.objectives.map(o =>
+              `<li class="${o.teacherStatus === 'success' ? 'checked-teacher' : ''}">
+                <strong>[Siswa: ${escapeHtml(o.studentStatus)} | Guru: ${escapeHtml(o.teacherStatus)}]</strong> ${escapeHtml(o.title)}
+              </li>`
+            ).join('') + `</ul>`
+          : `<span class="sub-muted">Tidak ada sub-objektif (langsung update status level)</span>`;
+
+        const isDone = it._checkedDone === true;
+        return `
+          <tr>
+            <td><input type="checkbox" class="row-check" data-key="${escapeHtml(it.key)}" ${isDone ? '' : 'checked'} onchange="updateActionButtons()" /></td>
+            <td>
+              <div><a class="ext-link" href="${escapeHtml(it.groupProgressUrl)}" target="_blank">${escapeHtml(it.groupTitle)}</a></div>
+              <div class="sub-muted">Group ID: ${it.groupId} &bull; ${escapeHtml(it.lessonTitle || ('Lesson #' + it.lessonId))}</div>
+            </td>
+            <td>
+              <div><strong>${escapeHtml(it.studentName)}</strong></div>
+              <div class="sub-muted">ID: ${it.studentId}</div>
+            </td>
+            <td>
+              <div>
+                <span class="level-badge ${isDone ? 'done' : ''}">${it.levelPosition}</span>
+                <a class="ext-link" href="${escapeHtml(it.taskPreviewUrl)}" target="_blank">${escapeHtml(it.taskTitle || ('Task #' + it.taskId))}</a>
+              </div>
+              <div class="sub-muted">${escapeHtml(it.levelTitle)} (Level ID: ${it.levelId}, Mechanic: ${escapeHtml(it.levelMechanic)})</div>
+            </td>
+            <td>${objsHtml}</td>
+            <td>
+              <span id="status-${idx}" style="font-weight:600;color:${isDone ? 'var(--green)' : 'var(--yellow)'};">
+                ${isDone ? 'COMPLETE (Hijau)' : 'STUDENT_SUCCESS (Kuning)'}
+              </span>
+            </td>
+          </tr>
+        `;
+      }).join('');
+
+      document.getElementById('selectAll').checked = true;
+      updateActionButtons();
+    }
+
+    function toggleSelectAll(checked) {
+      document.querySelectorAll('.row-check').forEach(cb => { cb.checked = checked; });
+      updateActionButtons();
+    }
+
+    function getSelectedKeys() {
+      return Array.from(document.querySelectorAll('.row-check:checked')).map(cb => cb.getAttribute('data-key'));
+    }
+
+    function updateActionButtons() {
+      const keys = getSelectedKeys();
+      document.getElementById('btnDryRunSelected').disabled = keys.length === 0;
+      document.getElementById('btnApproveSelected').disabled = keys.length === 0;
+    }
+
+    async function executeSelected(dryRun) {
+      const keys = getSelectedKeys();
+      if (keys.length === 0) return;
+
+      if (!dryRun) {
+        const ok = confirm(`KONFIRMASI EKSEKUSI:\n\nAnda akan mengirim request POST untuk menceklis (Approve) ${keys.length} level tugas kuning ke LMS Algonova.\n\nLanjutkan?`);
+        if (!ok) return;
+      }
+
+      try {
+        const res = await apiFetch('/api/execute', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ keys, dryRun })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          alert('Gagal mengeksekusi: ' + (data.error || res.statusText));
+          return;
+        }
+        if (!dryRun && data.results) {
+          const okMap = {};
+          data.results.forEach(r => { if (r.success) okMap[r.item.key] = true; });
+          currentItems.forEach(it => { if (okMap[it.key]) it._checkedDone = true; });
+          renderTable();
+        }
+        await refreshStatus();
+        alert(dryRun
+          ? `Simulasi Dry-Run selesai untuk ${data.results.length} level (0 POST dikirim ke Algonova).`
+          : `Eksekusi selesai! ${data.succeeded}/${data.results.length} level berhasil diubah menjadi Hijau (complete).`
+        );
+      } catch (e) {
+        alert('Error: ' + e.message);
+      }
+    }
+
+    async function toggleScheduler() {
+      try {
+        const payload = {
+          enabled: !cronEnabled,
+          interval: document.getElementById('cronInterval').value,
+          autoExecute: document.getElementById('cronAutoExec').checked
+        };
+        const res = await apiFetch('/api/scheduler', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(payload)
+        });
+        await res.json();
+        await refreshStatus();
+      } catch (e) {
+        alert('Error: ' + e.message);
+      }
+    }
+
+    async function promptUpdateCookie() {
+      const raw = prompt('Masukkan string Cookie Algonova baru (contoh: _backendMainSessionId=...; accessToken=...)\nAtau kosongkan jika hanya ingin trigger Re-Login otomatis:');
+      if (raw === null) return;
+      try {
+        const res = await apiFetch('/api/algonova-session', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ rawCookies: raw })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          alert('Gagal memperbarui sesi Algonova: ' + (data.error || res.statusText));
+          return;
+        }
+        alert('Sesi Algonova berhasil diperbarui dan disimpan ke SQLite! Unreviewed Count: ' + data.unreviewedGlobalCount);
+        await refreshStatus();
+      } catch (e) {
+        alert('Error: ' + e.message);
+      }
+    }
+
+    async function logout() {
+      await fetch('/api/auth/logout', { method: 'POST' });
+      window.location.href = '/login';
+    }
+
+    function escapeHtml(s) {
+      if (!s) return '';
+      return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    refreshStatus();
+  </script>
+</body>
+</html>

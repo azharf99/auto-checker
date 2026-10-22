@@ -1,0 +1,13 @@
+services:
+  auto-checker:
+    build: .
+    container_name: algonova-auto-checker
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./cookies.json:/app/cookies.json
+    command: ["--serve", "--addr=:8080"]

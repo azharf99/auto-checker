@@ -1,0 +1,10 @@
+.env
+cookies.json
+data/
+*.db
+*.db-shm
+*.db-wal
+*.exe
+*.out
+dist/
+tmp/
