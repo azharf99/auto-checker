@@ -1,13 +1,13 @@
 services:
   auto-checker:
+    image: azharfa/auto-checker:latest
     build: .
     container_name: algonova-auto-checker
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8097:8080"
     env_file:
       - .env
     volumes:
       - ./data:/app/data
-      - ./cookies.json:/app/cookies.json
     command: ["--serve", "--addr=:8080"]
