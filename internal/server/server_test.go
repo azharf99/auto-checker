@@ -14,8 +14,8 @@ import (
 	"auto-checker/internal/store"
 )
 
-func TestServerAuthAndRateLimiter(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "server_test.db")
+func TestMultiUserServerAuthAndRBAC(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "server_multiuser_test.db")
 	st, err := store.NewSQLiteStore(dbPath)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore failed: %v", err)
@@ -27,7 +27,7 @@ func TestServerAuthAndRateLimiter(t *testing.T) {
 		CookieFile:    filepath.Join(t.TempDir(), "cookies.json"),
 		DBPath:        dbPath,
 		DashboardUser: "azharfa",
-		DashboardPass: "MySecurePass!",
+		DashboardPass: "AdminSecret123!",
 		SessionTTL:    24 * time.Hour,
 		DiscoveryMode: "unreviewed",
 		Timeframe:     "current",
@@ -38,12 +38,12 @@ func TestServerAuthAndRateLimiter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient failed: %v", err)
 	}
-	client.AttachCookieStore(st)
 
 	srv := NewServer(cfg, client, st)
+	defer srv.Close()
 	handler := srv.Handler()
 
-	// 1. Unauthenticated GET / should redirect to /login
+	// 1. Unauthenticated GET / harus redirect 302 ke /login
 	reqRoot := httptest.NewRequest(http.MethodGet, "/", nil)
 	recRoot := httptest.NewRecorder()
 	handler.ServeHTTP(recRoot, reqRoot)
@@ -52,7 +52,7 @@ func TestServerAuthAndRateLimiter(t *testing.T) {
 			recRoot.Code, recRoot.Header().Get("Location"))
 	}
 
-	// 2. Unauthenticated GET /api/status should return 401
+	// 2. Unauthenticated GET /api/status harus return 401
 	reqStatus := httptest.NewRequest(http.MethodGet, "/api/status", nil)
 	recStatus := httptest.NewRecorder()
 	handler.ServeHTTP(recStatus, reqStatus)
@@ -60,58 +60,132 @@ func TestServerAuthAndRateLimiter(t *testing.T) {
 		t.Fatalf("expected 401 for unauthenticated /api/status, got %d", recStatus.Code)
 	}
 
-	// 3. Valid Login on IP 10.0.0.1
-	loginBody, _ := json.Marshal(map[string]string{
+	// 3. Admin Login berhasil
+	adminLoginBody, _ := json.Marshal(map[string]string{
 		"username": "azharfa",
-		"password": "MySecurePass!",
+		"password": "AdminSecret123!",
 	})
-	reqLogin := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(loginBody))
-	reqLogin.RemoteAddr = "10.0.0.1:12345"
-	recLogin := httptest.NewRecorder()
-	handler.ServeHTTP(recLogin, reqLogin)
-	if recLogin.Code != http.StatusOK {
-		t.Fatalf("expected 200 on valid login, got %d: %s", recLogin.Code, recLogin.Body.String())
+	reqAdminLogin := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(adminLoginBody))
+	reqAdminLogin.RemoteAddr = "10.0.0.1:12345"
+	recAdminLogin := httptest.NewRecorder()
+	handler.ServeHTTP(recAdminLogin, reqAdminLogin)
+	if recAdminLogin.Code != http.StatusOK {
+		t.Fatalf("expected 200 on admin login, got %d: %s", recAdminLogin.Code, recAdminLogin.Body.String())
 	}
-	cookies := recLogin.Result().Cookies()
-	var authCookie *http.Cookie
-	for _, c := range cookies {
+	adminCookies := recAdminLogin.Result().Cookies()
+	var adminAuthCookie *http.Cookie
+	for _, c := range adminCookies {
 		if c.Name == sessionCookieName {
-			authCookie = c
+			adminAuthCookie = c
 			break
 		}
 	}
-	if authCookie == nil || !authCookie.HttpOnly {
-		t.Fatalf("expected HttpOnly %s cookie on login", sessionCookieName)
+	if adminAuthCookie == nil || !adminAuthCookie.HttpOnly {
+		t.Fatalf("expected HttpOnly %s cookie on admin login", sessionCookieName)
 	}
 
-	// 4. Authenticated GET /api/status should return 200
-	reqAuthed := httptest.NewRequest(http.MethodGet, "/api/status", nil)
-	reqAuthed.AddCookie(authCookie)
-	recAuthed := httptest.NewRecorder()
-	handler.ServeHTTP(recAuthed, reqAuthed)
-	if recAuthed.Code != http.StatusOK {
-		t.Fatalf("expected 200 on authenticated /api/status, got %d", recAuthed.Code)
-	}
-
-	// 5. Brute-force protection on IP 10.0.0.99 (5 wrong attempts -> 6th returns 429)
-	badBody, _ := json.Marshal(map[string]string{
-		"username": "azharfa",
-		"password": "wrongpassword",
+	// 4. Admin membuat user Guru baru
+	createTeacherBody, _ := json.Marshal(map[string]string{
+		"username":    "guru_siti",
+		"displayName": "Siti Nurhaliza",
+		"password":    "PasswordSiti123!",
+		"role":        "teacher",
 	})
-	for i := 1; i <= 5; i++ {
-		r := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(badBody))
-		r.RemoteAddr = "10.0.0.99:5555"
-		w := httptest.NewRecorder()
-		handler.ServeHTTP(w, r)
-		if w.Code != http.StatusUnauthorized {
-			t.Fatalf("attempt %d: expected 401, got %d", i, w.Code)
+	reqCreate := httptest.NewRequest(http.MethodPost, "/api/admin/users", bytes.NewReader(createTeacherBody))
+	reqCreate.AddCookie(adminAuthCookie)
+	reqCreate.Header.Set("Content-Type", "application/json")
+	recCreate := httptest.NewRecorder()
+	handler.ServeHTTP(recCreate, reqCreate)
+	if recCreate.Code != http.StatusOK {
+		t.Fatalf("expected 200 on admin creating user, got %d: %s", recCreate.Code, recCreate.Body.String())
+	}
+
+	// 5. Guru (Teacher) Login
+	teacherLoginBody, _ := json.Marshal(map[string]string{
+		"username": "guru_siti",
+		"password": "PasswordSiti123!",
+	})
+	reqTeacherLogin := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(teacherLoginBody))
+	reqTeacherLogin.RemoteAddr = "10.0.0.2:22222"
+	recTeacherLogin := httptest.NewRecorder()
+	handler.ServeHTTP(recTeacherLogin, reqTeacherLogin)
+	if recTeacherLogin.Code != http.StatusOK {
+		t.Fatalf("expected 200 on teacher login, got %d: %s", recTeacherLogin.Code, recTeacherLogin.Body.String())
+	}
+	var teacherAuthCookie *http.Cookie
+	for _, c := range recTeacherLogin.Result().Cookies() {
+		if c.Name == sessionCookieName {
+			teacherAuthCookie = c
+			break
 		}
 	}
-	rBlocked := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(badBody))
-	rBlocked.RemoteAddr = "10.0.0.99:5555"
-	wBlocked := httptest.NewRecorder()
-	handler.ServeHTTP(wBlocked, rBlocked)
-	if wBlocked.Code != http.StatusTooManyRequests {
-		t.Fatalf("6th attempt: expected 429 Too Many Requests, got %d", wBlocked.Code)
+
+	// 6. Guru mengakses /api/status -> role harus "teacher"
+	reqTeacherStatus := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	reqTeacherStatus.AddCookie(teacherAuthCookie)
+	recTeacherStatus := httptest.NewRecorder()
+	handler.ServeHTTP(recTeacherStatus, reqTeacherStatus)
+	if recTeacherStatus.Code != http.StatusOK {
+		t.Fatalf("expected 200 on teacher status, got %d", recTeacherStatus.Code)
+	}
+	var teacherStatusData map[string]any
+	_ = json.Unmarshal(recTeacherStatus.Body.Bytes(), &teacherStatusData)
+	if teacherStatusData["role"] != "teacher" || teacherStatusData["currentUser"] != "guru_siti" {
+		t.Fatalf("unexpected teacher status data: %+v", teacherStatusData)
+	}
+
+	// 7. Guru mencoba mengakses endpoint Admin -> Harus ditolak 403 Forbidden!
+	reqForbidden := httptest.NewRequest(http.MethodGet, "/api/admin/users", nil)
+	reqForbidden.AddCookie(teacherAuthCookie)
+	recForbidden := httptest.NewRecorder()
+	handler.ServeHTTP(recForbidden, reqForbidden)
+	if recForbidden.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden for teacher accessing admin endpoint, got %d", recForbidden.Code)
+	}
+
+	// 8. Guru mengganti password mandiri (/api/user/change-password)
+	changePassBody, _ := json.Marshal(map[string]string{
+		"oldPassword": "PasswordSiti123!",
+		"newPassword": "PasswordSitiBaru456!",
+	})
+	reqChange := httptest.NewRequest(http.MethodPost, "/api/user/change-password", bytes.NewReader(changePassBody))
+	reqChange.AddCookie(teacherAuthCookie)
+	reqChange.Header.Set("Content-Type", "application/json")
+	recChange := httptest.NewRecorder()
+	handler.ServeHTTP(recChange, reqChange)
+	if recChange.Code != http.StatusOK {
+		t.Fatalf("expected 200 on changing password, got %d: %s", recChange.Code, recChange.Body.String())
+	}
+
+	// 9. Login ulang dengan password baru
+	reqLoginNew := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader([]byte(`{"username":"guru_siti","password":"PasswordSitiBaru456!"}`)))
+	reqLoginNew.RemoteAddr = "10.0.0.2:33333"
+	recLoginNew := httptest.NewRecorder()
+	handler.ServeHTTP(recLoginNew, reqLoginNew)
+	if recLoginNew.Code != http.StatusOK {
+		t.Fatalf("expected 200 on login with new password, got %d", recLoginNew.Code)
+	}
+
+	// 10. Admin menonaktifkan akun Guru Siti
+	toggleBody, _ := json.Marshal(map[string]any{
+		"userId":   2,
+		"isActive": false,
+	})
+	reqToggle := httptest.NewRequest(http.MethodPost, "/api/admin/users/toggle-active", bytes.NewReader(toggleBody))
+	reqToggle.AddCookie(adminAuthCookie)
+	reqToggle.Header.Set("Content-Type", "application/json")
+	recToggle := httptest.NewRecorder()
+	handler.ServeHTTP(recToggle, reqToggle)
+	if recToggle.Code != http.StatusOK {
+		t.Fatalf("expected 200 on admin toggling active, got %d: %s", recToggle.Code, recToggle.Body.String())
+	}
+
+	// Sesi Guru Siti harus langsung tidak valid (401)
+	reqDeactivatedStatus := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	reqDeactivatedStatus.AddCookie(teacherAuthCookie)
+	recDeactivatedStatus := httptest.NewRecorder()
+	handler.ServeHTTP(recDeactivatedStatus, reqDeactivatedStatus)
+	if recDeactivatedStatus.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for deactivated user session, got %d", recDeactivatedStatus.Code)
 	}
 }

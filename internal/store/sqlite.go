@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,9 +17,21 @@ import (
 	"auto-checker/internal/algonova"
 )
 
+// User merepresentasikan akun pengguna (admin atau guru) pada auto-checker.
+type User struct {
+	ID          int64     `json:"id"`
+	Username    string    `json:"username"`
+	DisplayName string    `json:"displayName"`
+	Role        string    `json:"role"` // "admin" atau "teacher"
+	IsActive    bool      `json:"isActive"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+}
+
 // LogRecord merepresentasikan 1 baris log aktivitas di tabel activity_logs.
 type LogRecord struct {
 	ID        int64  `json:"id"`
+	UserID    int64  `json:"userId"`
 	Time      string `json:"time"`
 	Message   string `json:"message"`
 	CreatedAt string `json:"createdAt"`
@@ -27,6 +40,7 @@ type LogRecord struct {
 // HistoryRecord merepresentasikan 1 baris riwayat eksekusi di tabel execution_history.
 type HistoryRecord struct {
 	ID                int64  `json:"id"`
+	UserID            int64  `json:"userId"`
 	GroupID           int    `json:"groupId"`
 	GroupTitle        string `json:"groupTitle"`
 	StudentID         int    `json:"studentId"`
@@ -44,7 +58,7 @@ type HistoryRecord struct {
 	CheckedAt         string `json:"checkedAt"`
 }
 
-// Store mengelola penyimpanan SQLite untuk user, session, cookie Algonova, pengaturan, dan log audit.
+// Store mengelola penyimpanan SQLite untuk pengguna multi-tenant, sesi, cookie Algonova, pengaturan, dan log audit.
 type Store struct {
 	db *sql.DB
 }
@@ -64,7 +78,7 @@ func NewSQLiteStore(dbPath string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite %q: %w", dbPath, err)
 	}
-	// Gunakan 1 koneksi tulis terpusat + WAL mode untuk mencegah SQLITE_BUSY pada akses konkuren
+	// Gunakan 1 koneksi terpusat + WAL mode untuk integritas data SQLite
 	db.SetMaxOpenConns(1)
 
 	s := &Store{db: db}
@@ -82,42 +96,76 @@ func (s *Store) Close() error {
 	return nil
 }
 
+func hasColumn(db *sql.DB, tableName, colName string) (bool, error) {
+	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", tableName))
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return false, err
+		}
+		if strings.EqualFold(name, colName) {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
 func (s *Store) migrate() error {
-	queries := []string{
+	initQueries := []string{
 		`PRAGMA journal_mode=WAL;`,
 		`PRAGMA busy_timeout=5000;`,
 		`CREATE TABLE IF NOT EXISTS users (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			username TEXT NOT NULL UNIQUE,
 			password_hash TEXT NOT NULL,
-			updated_at DATETIME NOT NULL
+			role TEXT NOT NULL DEFAULT 'teacher',
+			display_name TEXT NOT NULL DEFAULT '',
+			is_active INTEGER NOT NULL DEFAULT 1,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);`,
 		`CREATE TABLE IF NOT EXISTS dashboard_sessions (
 			token TEXT PRIMARY KEY,
+			user_id INTEGER NOT NULL DEFAULT 1,
 			username TEXT NOT NULL,
+			ip_address TEXT NOT NULL DEFAULT '',
+			user_agent TEXT NOT NULL DEFAULT '',
 			expires_at DATETIME NOT NULL,
 			created_at DATETIME NOT NULL
 		);`,
-		`CREATE TABLE IF NOT EXISTS algonova_cookies (
-			name TEXT PRIMARY KEY,
+		`CREATE TABLE IF NOT EXISTS user_algonova_cookies (
+			user_id INTEGER NOT NULL,
+			name TEXT NOT NULL,
 			value TEXT NOT NULL,
 			domain TEXT NOT NULL,
 			path TEXT NOT NULL,
-			updated_at DATETIME NOT NULL
+			updated_at DATETIME NOT NULL,
+			PRIMARY KEY (user_id, name)
 		);`,
-		`CREATE TABLE IF NOT EXISTS app_settings (
-			key TEXT PRIMARY KEY,
+		`CREATE TABLE IF NOT EXISTS user_settings (
+			user_id INTEGER NOT NULL,
+			key TEXT NOT NULL,
 			value TEXT NOT NULL,
-			updated_at DATETIME NOT NULL
+			updated_at DATETIME NOT NULL,
+			PRIMARY KEY (user_id, key)
 		);`,
 		`CREATE TABLE IF NOT EXISTS activity_logs (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL DEFAULT 1,
 			time_label TEXT NOT NULL,
 			message TEXT NOT NULL,
 			created_at DATETIME NOT NULL
 		);`,
 		`CREATE TABLE IF NOT EXISTS execution_history (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL DEFAULT 1,
 			group_id INTEGER NOT NULL,
 			group_title TEXT NOT NULL,
 			student_id INTEGER NOT NULL,
@@ -136,56 +184,320 @@ func (s *Store) migrate() error {
 		);`,
 	}
 
-	for _, q := range queries {
+	for _, q := range initQueries {
 		if _, err := s.db.Exec(q); err != nil {
-			return fmt.Errorf("sqlite migration failed: %w", err)
+			return fmt.Errorf("sqlite init query failed: %w", err)
 		}
 	}
+
+	// Dynamic column checks and migrations for existing databases
+	if has, _ := hasColumn(s.db, "users", "role"); !has {
+		_, _ = s.db.Exec(`ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'teacher'`)
+	}
+	if has, _ := hasColumn(s.db, "users", "display_name"); !has {
+		_, _ = s.db.Exec(`ALTER TABLE users ADD COLUMN display_name TEXT NOT NULL DEFAULT ''`)
+	}
+	if has, _ := hasColumn(s.db, "users", "is_active"); !has {
+		_, _ = s.db.Exec(`ALTER TABLE users ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1`)
+	}
+	if has, _ := hasColumn(s.db, "users", "created_at"); !has {
+		_, _ = s.db.Exec(`ALTER TABLE users ADD COLUMN created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP`)
+	}
+
+	if has, _ := hasColumn(s.db, "dashboard_sessions", "user_id"); !has {
+		_, _ = s.db.Exec(`ALTER TABLE dashboard_sessions ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1`)
+	}
+	if has, _ := hasColumn(s.db, "dashboard_sessions", "ip_address"); !has {
+		_, _ = s.db.Exec(`ALTER TABLE dashboard_sessions ADD COLUMN ip_address TEXT NOT NULL DEFAULT ''`)
+	}
+	if has, _ := hasColumn(s.db, "dashboard_sessions", "user_agent"); !has {
+		_, _ = s.db.Exec(`ALTER TABLE dashboard_sessions ADD COLUMN user_agent TEXT NOT NULL DEFAULT ''`)
+	}
+
+	if has, _ := hasColumn(s.db, "activity_logs", "user_id"); !has {
+		_, _ = s.db.Exec(`ALTER TABLE activity_logs ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1`)
+	}
+	if has, _ := hasColumn(s.db, "execution_history", "user_id"); !has {
+		_, _ = s.db.Exec(`ALTER TABLE execution_history ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1`)
+	}
+
+	// Create indices for fast multi-tenant queries
+	_, _ = s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_activity_logs_user ON activity_logs (user_id, id DESC)`)
+	_, _ = s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_execution_history_user ON execution_history (user_id, id DESC)`)
+	_, _ = s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_sessions_user ON dashboard_sessions (user_id)`)
+
+	// Data migration from old single-user tables to user_id = 1 if applicable
+	var oldCookieCount int
+	_ = s.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='algonova_cookies'`).Scan(&oldCookieCount)
+	if oldCookieCount > 0 {
+		var newCount int
+		_ = s.db.QueryRow(`SELECT count(*) FROM user_algonova_cookies WHERE user_id = 1`).Scan(&newCount)
+		if newCount == 0 {
+			_, _ = s.db.Exec(`INSERT OR IGNORE INTO user_algonova_cookies (user_id, name, value, domain, path, updated_at)
+				SELECT 1, name, value, domain, path, updated_at FROM algonova_cookies`)
+		}
+	}
+
+	var oldSettingsCount int
+	_ = s.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='app_settings'`).Scan(&oldSettingsCount)
+	if oldSettingsCount > 0 {
+		var newSettingsCount int
+		_ = s.db.QueryRow(`SELECT count(*) FROM user_settings WHERE user_id = 1`).Scan(&newSettingsCount)
+		if newSettingsCount == 0 {
+			_, _ = s.db.Exec(`INSERT OR IGNORE INTO user_settings (user_id, key, value, updated_at)
+				SELECT 1, key, value, updated_at FROM app_settings`)
+		}
+	}
+
 	return nil
 }
 
-// EnsureAdminUser membuat atau memperbarui user admin Web Dashboard dengan password ter-hash (bcrypt).
-func (s *Store) EnsureAdminUser(username, plainPassword string) error {
-	username = strings.TrimSpace(username)
+// EnsureAdminUser membuat atau memperbarui user admin Web Dashboard dengan role "admin".
+func (s *Store) EnsureAdminUser(username, plainPassword string) (*User, error) {
+	username = strings.ToLower(strings.TrimSpace(username))
 	if username == "" || plainPassword == "" {
-		return nil
+		return nil, errors.New("username dan password tidak boleh kosong")
 	}
 
+	var u User
 	var existingHash string
-	err := s.db.QueryRow(`SELECT password_hash FROM users WHERE username = ?`, username).Scan(&existingHash)
+	now := time.Now().UTC()
+	err := s.db.QueryRow(`
+		SELECT id, username, password_hash, role, display_name, is_active, created_at, updated_at
+		FROM users WHERE username = ?
+	`, username).Scan(&u.ID, &u.Username, &existingHash, &u.Role, &u.DisplayName, &u.IsActive, &u.CreatedAt, &u.UpdatedAt)
+
 	if err == nil {
+		// User sudah ada, verifikasi apakah password cocok
 		if bcrypt.CompareHashAndPassword([]byte(existingHash), []byte(plainPassword)) == nil {
-			return nil
+			// Pastikan role tetap admin dan aktif
+			if u.Role != "admin" || !u.IsActive {
+				_, _ = s.db.Exec(`UPDATE users SET role = 'admin', is_active = 1, updated_at = ? WHERE id = ?`, now, u.ID)
+				u.Role = "admin"
+				u.IsActive = true
+			}
+			return &u, nil
 		}
 	}
 
 	hashBytes, err := bcrypt.GenerateFromPassword([]byte(plainPassword), bcrypt.DefaultCost)
 	if err != nil {
-		return fmt.Errorf("hash password: %w", err)
+		return nil, fmt.Errorf("hash password: %w", err)
 	}
 
-	_, err = s.db.Exec(`
-		INSERT INTO users (username, password_hash, updated_at)
-		VALUES (?, ?, ?)
+	displayName := username
+	if u.DisplayName != "" {
+		displayName = u.DisplayName
+	}
+
+	res, err := s.db.Exec(`
+		INSERT INTO users (username, password_hash, role, display_name, is_active, created_at, updated_at)
+		VALUES (?, ?, 'admin', ?, 1, ?, ?)
 		ON CONFLICT(username) DO UPDATE SET
 			password_hash = excluded.password_hash,
+			role = 'admin',
+			is_active = 1,
 			updated_at = excluded.updated_at
-	`, username, string(hashBytes), time.Now().UTC())
+	`, username, string(hashBytes), displayName, now, now)
+	if err != nil {
+		return nil, err
+	}
+
+	id, _ := res.LastInsertId()
+	if id == 0 && u.ID != 0 {
+		id = u.ID
+	}
+	return s.GetUserByID(id)
+}
+
+// AuthenticateUser memverifikasi username dan password. Jika valid dan aktif, mengembalikan struct User.
+func (s *Store) AuthenticateUser(username, plainPassword string) (*User, error) {
+	username = strings.ToLower(strings.TrimSpace(username))
+	var u User
+	var hash string
+	var isActive int
+	err := s.db.QueryRow(`
+		SELECT id, username, password_hash, role, display_name, is_active, created_at, updated_at
+		FROM users WHERE username = ?
+	`, username).Scan(&u.ID, &u.Username, &hash, &u.Role, &u.DisplayName, &isActive, &u.CreatedAt, &u.UpdatedAt)
+	if err != nil {
+		return nil, errors.New("username atau password salah")
+	}
+
+	if isActive != 1 {
+		return nil, errors.New("akun Anda telah dinonaktifkan oleh administrator")
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(plainPassword)); err != nil {
+		return nil, errors.New("username atau password salah")
+	}
+	u.IsActive = true
+	return &u, nil
+}
+
+// VerifyUser mempertahankan kompatibilitas lama (boolean).
+func (s *Store) VerifyUser(username, plainPassword string) bool {
+	u, err := s.AuthenticateUser(username, plainPassword)
+	return err == nil && u != nil
+}
+
+// GetUserByID mengambil user berdasarkan ID.
+func (s *Store) GetUserByID(id int64) (*User, error) {
+	var u User
+	var isActive int
+	err := s.db.QueryRow(`
+		SELECT id, username, role, display_name, is_active, created_at, updated_at
+		FROM users WHERE id = ?
+	`, id).Scan(&u.ID, &u.Username, &u.Role, &u.DisplayName, &isActive, &u.CreatedAt, &u.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	u.IsActive = isActive == 1
+	return &u, nil
+}
+
+// GetUserByUsername mengambil user berdasarkan username.
+func (s *Store) GetUserByUsername(username string) (*User, error) {
+	username = strings.ToLower(strings.TrimSpace(username))
+	var u User
+	var isActive int
+	err := s.db.QueryRow(`
+		SELECT id, username, role, display_name, is_active, created_at, updated_at
+		FROM users WHERE username = ?
+	`, username).Scan(&u.ID, &u.Username, &u.Role, &u.DisplayName, &isActive, &u.CreatedAt, &u.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	u.IsActive = isActive == 1
+	return &u, nil
+}
+
+// ListUsers mengambil seluruh daftar user untuk keperluan panel admin.
+func (s *Store) ListUsers() ([]User, error) {
+	rows, err := s.db.Query(`
+		SELECT id, username, role, display_name, is_active, created_at, updated_at
+		FROM users ORDER BY id ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var users []User
+	for rows.Next() {
+		var u User
+		var isActive int
+		if err := rows.Scan(&u.ID, &u.Username, &u.Role, &u.DisplayName, &isActive, &u.CreatedAt, &u.UpdatedAt); err != nil {
+			return nil, err
+		}
+		u.IsActive = isActive == 1
+		users = append(users, u)
+	}
+	return users, rows.Err()
+}
+
+// CreateUser menambahkan pengguna baru (dilakukan oleh Admin).
+func (s *Store) CreateUser(username, displayName, plainPassword, role string) (*User, error) {
+	username = strings.ToLower(strings.TrimSpace(username))
+	if len(username) < 3 || len(username) > 32 {
+		return nil, errors.New("username harus 3 - 32 karakter")
+	}
+	if len(plainPassword) < 8 {
+		return nil, errors.New("password minimal 8 karakter")
+	}
+	if role != "admin" {
+		role = "teacher"
+	}
+	if strings.TrimSpace(displayName) == "" {
+		displayName = username
+	}
+
+	hashBytes, err := bcrypt.GenerateFromPassword([]byte(plainPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return nil, fmt.Errorf("hash password: %w", err)
+	}
+
+	now := time.Now().UTC()
+	res, err := s.db.Exec(`
+		INSERT INTO users (username, password_hash, role, display_name, is_active, created_at, updated_at)
+		VALUES (?, ?, ?, ?, 1, ?, ?)
+	`, username, string(hashBytes), role, displayName, now, now)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE") {
+			return nil, fmt.Errorf("username %q sudah digunakan", username)
+		}
+		return nil, err
+	}
+
+	id, err := res.LastInsertId()
+	if err != nil {
+		return nil, err
+	}
+	return s.GetUserByID(id)
+}
+
+// UpdateUserPassword mengubah password user tertentu.
+func (s *Store) UpdateUserPassword(userID int64, newPlainPassword string) error {
+	if len(newPlainPassword) < 8 {
+		return errors.New("password baru minimal 8 karakter")
+	}
+	hashBytes, err := bcrypt.GenerateFromPassword([]byte(newPlainPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("hash password: %w", err)
+	}
+	now := time.Now().UTC()
+	_, err = s.db.Exec(`UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?`, string(hashBytes), now, userID)
 	return err
 }
 
-// VerifyUser memeriksa apakah username dan password cocok dengan data di tabel users.
-func (s *Store) VerifyUser(username, plainPassword string) bool {
-	var hash string
-	err := s.db.QueryRow(`SELECT password_hash FROM users WHERE username = ?`, strings.TrimSpace(username)).Scan(&hash)
-	if err != nil {
-		return false
+// UpdateUserStatus mengaktifkan / menonaktifkan akun user.
+func (s *Store) UpdateUserStatus(userID int64, isActive bool) error {
+	now := time.Now().UTC()
+	val := 0
+	if isActive {
+		val = 1
 	}
-	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(plainPassword)) == nil
+	_, err := s.db.Exec(`UPDATE users SET is_active = ?, updated_at = ? WHERE id = ?`, val, now, userID)
+	if err != nil {
+		return err
+	}
+	if !isActive {
+		_ = s.DeleteUserSessions(userID)
+	}
+	return nil
+}
+
+// DeleteUser menghapus user beserta seluruh data terisolasi miliknya (cascade).
+func (s *Store) DeleteUser(userID int64) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	_, _ = tx.Exec(`DELETE FROM dashboard_sessions WHERE user_id = ?`, userID)
+	_, _ = tx.Exec(`DELETE FROM user_algonova_cookies WHERE user_id = ?`, userID)
+	_, _ = tx.Exec(`DELETE FROM user_settings WHERE user_id = ?`, userID)
+	_, _ = tx.Exec(`DELETE FROM activity_logs WHERE user_id = ?`, userID)
+	_, _ = tx.Exec(`DELETE FROM execution_history WHERE user_id = ?`, userID)
+	_, err = tx.Exec(`DELETE FROM users WHERE id = ?`, userID)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // CreateSession membuat token sesi acak kriptografis 32-byte dan menyimpannya ke dashboard_sessions.
 func (s *Store) CreateSession(username string, ttl time.Duration) (string, error) {
+	u, err := s.GetUserByUsername(username)
+	if err != nil {
+		return "", err
+	}
+	return s.CreateUserSession(u.ID, u.Username, ttl, "", "")
+}
+
+// CreateUserSession membuat token sesi lengkap dengan user_id, ip, dan user-agent.
+func (s *Store) CreateUserSession(userID int64, username string, ttl time.Duration, ip, userAgent string) (string, error) {
 	if ttl <= 0 {
 		ttl = 7 * 24 * time.Hour
 	}
@@ -201,32 +513,55 @@ func (s *Store) CreateSession(username string, ttl time.Duration) (string, error
 	_, _ = s.db.Exec(`DELETE FROM dashboard_sessions WHERE expires_at <= ?`, now)
 
 	_, err := s.db.Exec(`
-		INSERT INTO dashboard_sessions (token, username, expires_at, created_at)
-		VALUES (?, ?, ?, ?)
-	`, token, username, exp, now)
+		INSERT INTO dashboard_sessions (token, user_id, username, ip_address, user_agent, expires_at, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, token, userID, username, ip, userAgent, exp, now)
 	if err != nil {
 		return "", err
 	}
 	return token, nil
 }
 
-// ValidateSession memeriksa apakah token sesi masih valid dan belum expired.
+// ValidateSession memeriksa apakah token sesi valid dan user masih aktif. Mengembalikan username dan bool (kompatibel).
 func (s *Store) ValidateSession(token string) (string, bool) {
+	u, ok := s.ValidateUserSession(token)
+	if !ok || u == nil {
+		return "", false
+	}
+	return u.Username, true
+}
+
+// ValidateUserSession memeriksa token dan mengembalikan struct *User lengkap jika valid dan aktif.
+func (s *Store) ValidateUserSession(token string) (*User, bool) {
 	token = strings.TrimSpace(token)
 	if token == "" {
-		return "", false
+		return nil, false
 	}
-	var username string
+	var u User
+	var isActive int
 	var expiresAt time.Time
-	err := s.db.QueryRow(`SELECT username, expires_at FROM dashboard_sessions WHERE token = ?`, token).Scan(&username, &expiresAt)
+	err := s.db.QueryRow(`
+		SELECT u.id, u.username, u.role, u.display_name, u.is_active, u.created_at, u.updated_at, s.expires_at
+		FROM dashboard_sessions s
+		JOIN users u ON s.user_id = u.id
+		WHERE s.token = ?
+	`, token).Scan(&u.ID, &u.Username, &u.Role, &u.DisplayName, &isActive, &u.CreatedAt, &u.UpdatedAt, &expiresAt)
 	if err != nil {
-		return "", false
+		return nil, false
 	}
+
 	if time.Now().UTC().After(expiresAt) {
 		_, _ = s.db.Exec(`DELETE FROM dashboard_sessions WHERE token = ?`, token)
-		return "", false
+		return nil, false
 	}
-	return username, true
+
+	if isActive != 1 {
+		_, _ = s.db.Exec(`DELETE FROM dashboard_sessions WHERE token = ?`, token)
+		return nil, false
+	}
+
+	u.IsActive = true
+	return &u, true
 }
 
 // DeleteSession menghapus token sesi saat user melakukan Logout.
@@ -235,8 +570,14 @@ func (s *Store) DeleteSession(token string) error {
 	return err
 }
 
-// SaveAlgonovaCookies menyimpan daftar cookie sesi Algonova ke dalam tabel algonova_cookies.
-func (s *Store) SaveAlgonovaCookies(cookies []algonova.SavedCookie) error {
+// DeleteUserSessions menghapus seluruh sesi aktif milik user tertentu.
+func (s *Store) DeleteUserSessions(userID int64) error {
+	_, err := s.db.Exec(`DELETE FROM dashboard_sessions WHERE user_id = ?`, userID)
+	return err
+}
+
+// SaveUserAlgonovaCookies menyimpan daftar cookie sesi Algonova khusus untuk user tertentu.
+func (s *Store) SaveUserAlgonovaCookies(userID int64, cookies []algonova.SavedCookie) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -257,14 +598,14 @@ func (s *Store) SaveAlgonovaCookies(cookies []algonova.SavedCookie) error {
 			path = "/"
 		}
 		_, err := tx.Exec(`
-			INSERT INTO algonova_cookies (name, value, domain, path, updated_at)
-			VALUES (?, ?, ?, ?, ?)
-			ON CONFLICT(name) DO UPDATE SET
+			INSERT INTO user_algonova_cookies (user_id, name, value, domain, path, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?)
+			ON CONFLICT(user_id, name) DO UPDATE SET
 				value = excluded.value,
 				domain = excluded.domain,
 				path = excluded.path,
 				updated_at = excluded.updated_at
-		`, ck.Name, ck.Value, domain, path, now)
+		`, userID, ck.Name, ck.Value, domain, path, now)
 		if err != nil {
 			return err
 		}
@@ -272,9 +613,14 @@ func (s *Store) SaveAlgonovaCookies(cookies []algonova.SavedCookie) error {
 	return tx.Commit()
 }
 
-// LoadAlgonovaCookies mengambil seluruh cookie sesi Algonova yang tersimpan di SQLite.
-func (s *Store) LoadAlgonovaCookies() ([]algonova.SavedCookie, error) {
-	rows, err := s.db.Query(`SELECT name, value, domain, path FROM algonova_cookies ORDER BY name ASC`)
+// LoadUserAlgonovaCookies mengambil seluruh cookie sesi Algonova milik user tertentu.
+func (s *Store) LoadUserAlgonovaCookies(userID int64) ([]algonova.SavedCookie, error) {
+	rows, err := s.db.Query(`
+		SELECT name, value, domain, path
+		FROM user_algonova_cookies
+		WHERE user_id = ?
+		ORDER BY name ASC
+	`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -291,60 +637,104 @@ func (s *Store) LoadAlgonovaCookies() ([]algonova.SavedCookie, error) {
 	return out, rows.Err()
 }
 
-// SetSetting menyimpan pasangan key-value konfigurasi ke tabel app_settings.
-func (s *Store) SetSetting(key, value string) error {
+// SaveAlgonovaCookies kompatibilitas lama (tersimpan ke user_id = 1).
+func (s *Store) SaveAlgonovaCookies(cookies []algonova.SavedCookie) error {
+	return s.SaveUserAlgonovaCookies(1, cookies)
+}
+
+// LoadAlgonovaCookies kompatibilitas lama (terbaca dari user_id = 1).
+func (s *Store) LoadAlgonovaCookies() ([]algonova.SavedCookie, error) {
+	return s.LoadUserAlgonovaCookies(1)
+}
+
+// SetUserSetting menyimpan pasangan key-value konfigurasi untuk user tertentu.
+func (s *Store) SetUserSetting(userID int64, key, value string) error {
 	_, err := s.db.Exec(`
-		INSERT INTO app_settings (key, value, updated_at)
-		VALUES (?, ?, ?)
-		ON CONFLICT(key) DO UPDATE SET
+		INSERT INTO user_settings (user_id, key, value, updated_at)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(user_id, key) DO UPDATE SET
 			value = excluded.value,
 			updated_at = excluded.updated_at
-	`, key, value, time.Now().UTC())
+	`, userID, key, value, time.Now().UTC())
 	return err
 }
 
-// GetSetting membaca nilai konfigurasi dari tabel app_settings atau mengembalikan fallback jika belum ada.
-func (s *Store) GetSetting(key, fallback string) string {
+// GetUserSetting membaca nilai konfigurasi untuk user tertentu atau mengembalikan fallback.
+func (s *Store) GetUserSetting(userID int64, key, fallback string) string {
 	var val string
-	if err := s.db.QueryRow(`SELECT value FROM app_settings WHERE key = ?`, key).Scan(&val); err != nil {
+	if err := s.db.QueryRow(`SELECT value FROM user_settings WHERE user_id = ? AND key = ?`, userID, key).Scan(&val); err != nil {
 		return fallback
 	}
 	return val
 }
 
-// AddLog mencatat 1 baris log aktivitas ke tabel activity_logs dan menjaga jumlah baris maksimal 500.
-func (s *Store) AddLog(timeLabel, message string) error {
+// SetSetting kompatibilitas lama (tersimpan ke user_id = 1).
+func (s *Store) SetSetting(key, value string) error {
+	return s.SetUserSetting(1, key, value)
+}
+
+// GetSetting kompatibilitas lama (terbaca dari user_id = 1).
+func (s *Store) GetSetting(key, fallback string) string {
+	return s.GetUserSetting(1, key, fallback)
+}
+
+// ListUsersWithCronEnabled mengambil ID semua user aktif yang mengaktifkan scheduler otomatis.
+func (s *Store) ListUsersWithCronEnabled() ([]int64, error) {
+	rows, err := s.db.Query(`
+		SELECT s.user_id
+		FROM user_settings s
+		JOIN users u ON s.user_id = u.id
+		WHERE u.is_active = 1 AND s.key = 'cron_enabled' AND s.value = 'true'
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	return ids, rows.Err()
+}
+
+// AddUserLog mencatat log aktivitas untuk user tertentu (dibatasi 300 per user).
+func (s *Store) AddUserLog(userID int64, timeLabel, message string) error {
 	_, err := s.db.Exec(`
-		INSERT INTO activity_logs (time_label, message, created_at)
-		VALUES (?, ?, ?)
-	`, timeLabel, message, time.Now().UTC())
+		INSERT INTO activity_logs (user_id, time_label, message, created_at)
+		VALUES (?, ?, ?, ?)
+	`, userID, timeLabel, message, time.Now().UTC())
 	if err != nil {
 		return err
 	}
 	_, _ = s.db.Exec(`
 		DELETE FROM activity_logs
-		WHERE id NOT IN (
-			SELECT id FROM activity_logs ORDER BY id DESC LIMIT 500
+		WHERE user_id = ? AND id NOT IN (
+			SELECT id FROM activity_logs WHERE user_id = ? ORDER BY id DESC LIMIT 300
 		)
-	`)
+	`, userID, userID)
 	return nil
 }
 
-// GetRecentLogs mengambil log aktivitas terbaru secara berurutan (lama -> baru) untuk ditampilkan di UI.
-func (s *Store) GetRecentLogs(limit int) ([]LogRecord, error) {
+// GetUserRecentLogs mengambil log aktivitas terbaru milik user tertentu.
+func (s *Store) GetUserRecentLogs(userID int64, limit int) ([]LogRecord, error) {
 	if limit <= 0 {
 		limit = 100
 	}
 	rows, err := s.db.Query(`
-		SELECT id, time_label, message, created_at
+		SELECT id, user_id, time_label, message, created_at
 		FROM (
-			SELECT id, time_label, message, created_at
+			SELECT id, user_id, time_label, message, created_at
 			FROM activity_logs
+			WHERE user_id = ?
 			ORDER BY id DESC
 			LIMIT ?
 		)
 		ORDER BY id ASC
-	`, limit)
+	`, userID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -354,7 +744,7 @@ func (s *Store) GetRecentLogs(limit int) ([]LogRecord, error) {
 	for rows.Next() {
 		var r LogRecord
 		var createdAt time.Time
-		if err := rows.Scan(&r.ID, &r.Time, &r.Message, &createdAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.UserID, &r.Time, &r.Message, &createdAt); err != nil {
 			return nil, err
 		}
 		r.CreatedAt = createdAt.Local().Format("2006-01-02 15:04:05")
@@ -363,8 +753,18 @@ func (s *Store) GetRecentLogs(limit int) ([]LogRecord, error) {
 	return out, rows.Err()
 }
 
-// AddExecutionHistory mencatat hasil eksekusi checklist 1 level ke tabel execution_history.
-func (s *Store) AddExecutionHistory(res algonova.CheckResult) error {
+// AddLog kompatibilitas lama (tersimpan ke user_id = 1).
+func (s *Store) AddLog(timeLabel, message string) error {
+	return s.AddUserLog(1, timeLabel, message)
+}
+
+// GetRecentLogs kompatibilitas lama (terbaca dari user_id = 1).
+func (s *Store) GetRecentLogs(limit int) ([]LogRecord, error) {
+	return s.GetUserRecentLogs(1, limit)
+}
+
+// AddUserExecutionHistory mencatat hasil eksekusi checklist 1 level ke execution_history milik user tertentu.
+func (s *Store) AddUserExecutionHistory(userID int64, res algonova.CheckResult) error {
 	dryInt := 0
 	if res.DryRun {
 		dryInt = 1
@@ -376,11 +776,12 @@ func (s *Store) AddExecutionHistory(res algonova.CheckResult) error {
 
 	_, err := s.db.Exec(`
 		INSERT INTO execution_history (
-			group_id, group_title, student_id, student_name,
+			user_id, group_id, group_title, student_id, student_name,
 			lesson_id, task_id, task_title, level_id, level_position, level_title,
 			objectives_checked, dry_run, success, error, checked_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
+		userID,
 		res.Item.GroupID,
 		res.Item.GroupTitle,
 		res.Item.StudentID,
@@ -400,20 +801,21 @@ func (s *Store) AddExecutionHistory(res algonova.CheckResult) error {
 	return err
 }
 
-// GetExecutionHistory mengambil daftar riwayat eksekusi terbaru (baru -> lama).
-func (s *Store) GetExecutionHistory(limit int) ([]HistoryRecord, error) {
+// GetUserExecutionHistory mengambil daftar riwayat eksekusi terbaru milik user tertentu.
+func (s *Store) GetUserExecutionHistory(userID int64, limit int) ([]HistoryRecord, error) {
 	if limit <= 0 {
 		limit = 100
 	}
 	rows, err := s.db.Query(`
 		SELECT
-			id, group_id, group_title, student_id, student_name,
+			id, user_id, group_id, group_title, student_id, student_name,
 			lesson_id, task_id, task_title, level_id, level_position, level_title,
 			objectives_checked, dry_run, success, error, checked_at
 		FROM execution_history
+		WHERE user_id = ?
 		ORDER BY id DESC
 		LIMIT ?
-	`, limit)
+	`, userID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -425,7 +827,7 @@ func (s *Store) GetExecutionHistory(limit int) ([]HistoryRecord, error) {
 		var dryInt, succInt int
 		var checkedAt time.Time
 		if err := rows.Scan(
-			&h.ID, &h.GroupID, &h.GroupTitle, &h.StudentID, &h.StudentName,
+			&h.ID, &h.UserID, &h.GroupID, &h.GroupTitle, &h.StudentID, &h.StudentName,
 			&h.LessonID, &h.TaskID, &h.TaskTitle, &h.LevelID, &h.LevelPosition, &h.LevelTitle,
 			&h.ObjectivesChecked, &dryInt, &succInt, &h.Error, &checkedAt,
 		); err != nil {
@@ -437,4 +839,14 @@ func (s *Store) GetExecutionHistory(limit int) ([]HistoryRecord, error) {
 		out = append(out, h)
 	}
 	return out, rows.Err()
+}
+
+// AddExecutionHistory kompatibilitas lama (tersimpan ke user_id = 1).
+func (s *Store) AddExecutionHistory(res algonova.CheckResult) error {
+	return s.AddUserExecutionHistory(1, res)
+}
+
+// GetExecutionHistory kompatibilitas lama (terbaca dari user_id = 1).
+func (s *Store) GetExecutionHistory(limit int) ([]HistoryRecord, error) {
+	return s.GetUserExecutionHistory(1, limit)
 }

@@ -96,6 +96,7 @@ func runWebServer(ctx context.Context, cfg *config.Config, client *algonova.Clie
 
 	go func() {
 		<-ctx.Done()
+		srv.Close()
 		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = httpSrv.Shutdown(shutCtx)

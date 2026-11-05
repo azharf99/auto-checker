@@ -61,6 +61,21 @@
     .dot.ok { background: var(--green); box-shadow: 0 0 8px var(--green); }
     .dot.warn { background: var(--yellow); box-shadow: 0 0 8px var(--yellow); }
 
+    .role-badge {
+      font-size: 11px;
+      font-weight: 700;
+      padding: 2px 7px;
+      border-radius: 999px;
+      text-transform: uppercase;
+      background: #334155;
+      color: #93c5fd;
+    }
+    .role-badge.admin {
+      background: rgba(139, 92, 246, 0.25);
+      color: #c4b5fd;
+      border: 1px solid rgba(139, 92, 246, 0.5);
+    }
+
     .grid-top {
       display: grid;
       grid-template-columns: 2fr 1fr;
@@ -92,7 +107,7 @@
       margin-bottom: 16px;
     }
     label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; font-weight: 600; }
-    input[type="text"], select {
+    input[type="text"], input[type="password"], select {
       width: 100%;
       padding: 9px 12px;
       border-radius: 8px;
@@ -100,7 +115,9 @@
       background: #0f172a;
       color: var(--text);
       font-size: 14px;
+      outline: none;
     }
+    input:focus, select:focus { border-color: var(--purple); }
     .checkbox-row {
       display: flex; align-items: center; gap: 8px;
       font-size: 13px; color: var(--text);
@@ -179,6 +196,48 @@
     }
     .log-line { margin-bottom: 4px; }
     .log-time { color: #64748b; margin-right: 6px; }
+
+    /* Modal Styles */
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.75);
+      backdrop-filter: blur(4px);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 999;
+      padding: 20px;
+    }
+    .modal-content {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      width: 100%;
+      max-width: 680px;
+      padding: 24px;
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.6);
+      max-height: 90vh;
+      overflow-y: auto;
+    }
+    .modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 18px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    .modal-header h3 { font-size: 17px; font-weight: 700; }
+    .modal-close {
+      background: none;
+      border: none;
+      color: var(--muted);
+      font-size: 20px;
+      cursor: pointer;
+      padding: 4px 8px;
+    }
+    .modal-close:hover { color: #fff; }
   </style>
 </head>
 <body>
@@ -188,7 +247,7 @@
         <div class="brand-logo">A</div>
         <div>
           <h1>Algonova Auto-Checker</h1>
-          <p>Otomasi Checklist Tugas Kuning (SQLite + Auth Protected)</p>
+          <p>Otomasi Checklist Tugas Siswa (Multi-User &amp; Zero Data Leakage)</p>
         </div>
       </div>
       <div class="status-pills">
@@ -206,6 +265,11 @@
         </div>
         <div class="pill">
           <span>User: <strong id="currentUser">-</strong></span>
+          <span id="userRoleBadge" class="role-badge">teacher</span>
+        </div>
+        <div class="btn-row">
+          <button id="btnAdminUsers" class="btn-primary" style="padding:6px 12px;font-size:12.5px;display:none;" onclick="openAdminModal()">Kelola Pengguna</button>
+          <button class="btn-secondary" style="padding:6px 12px;font-size:12.5px;" onclick="openChangePasswordModal()">Ganti Password</button>
           <button class="btn-danger" onclick="logout()">Logout</button>
         </div>
       </div>
@@ -246,22 +310,22 @@
         <div class="btn-row">
           <button id="btnScan" class="btn-primary" onclick="runScan()">Scan Tugas Kuning (Read-Only)</button>
           <button class="btn-secondary" onclick="refreshStatus()">Refresh Status &amp; Riwayat</button>
-          <button class="btn-secondary" onclick="promptUpdateCookie()">Update Cookie Algonova</button>
+          <button class="btn-secondary" onclick="promptUpdateCookie()">Update Cookie Algonova Saya</button>
         </div>
       </div>
 
       <div class="panel" style="margin-bottom:0;">
-        <h2>2. Built-in Cron Scheduler &amp; Log Aktivitas (SQLite)</h2>
+        <h2>2. Scheduler &amp; Log Aktivitas Pribadi</h2>
         <div style="display:flex; gap:10px; margin-bottom:10px; align-items:flex-end;">
           <div style="flex:1;">
-            <label for="cronInterval">Interval Cek Otomatis</label>
+            <label for="cronInterval">Interval Cek Otomatis Saya</label>
             <input type="text" id="cronInterval" value="6h" placeholder="Misal: 1h, 6h, 30m" />
           </div>
           <button id="btnToggleCron" class="btn-secondary" onclick="toggleScheduler()">Aktifkan Cron</button>
         </div>
         <label class="checkbox-row" style="margin-bottom:12px;">
           <input type="checkbox" id="cronAutoExec" />
-          <span>Izinkan Cron otomatis mengeksekusi POST Approve (tanpa klik manual)</span>
+          <span>Izinkan Cron otomatis mengeksekusi POST Approve akun saya (tanpa klik manual)</span>
         </label>
         <div id="logBox" class="log-box"></div>
       </div>
@@ -269,7 +333,7 @@
 
     <div class="panel">
       <h2>
-        <span>3. Daftar Tugas Kuning (student_success) — Ditemukan: <strong id="foundCount" style="color:var(--yellow)">0</strong> Level</span>
+        <span>3. Daftar Tugas Kuning Anda (student_success) — Ditemukan: <strong id="foundCount" style="color:var(--yellow)">0</strong> Level</span>
         <div class="btn-row">
           <button id="btnDryRunSelected" class="btn-secondary" onclick="executeSelected(true)" disabled>Simulasi Dry-Run Terpilih</button>
           <button id="btnApproveSelected" class="btn-success" onclick="executeSelected(false)" disabled>Approve (Ceklis ✓) Terpilih</button>
@@ -291,7 +355,7 @@
           <tbody id="tasksBody">
             <tr>
               <td colspan="6" style="text-align:center;color:var(--muted);padding:28px;">
-                Klik tombol <strong>"Scan Tugas Kuning (Read-Only)"</strong> di atas untuk memuat daftar tugas yang perlu diceklis.
+                Klik tombol <strong>"Scan Tugas Kuning (Read-Only)"</strong> di atas untuk memuat daftar tugas milik akun Anda.
               </td>
             </tr>
           </tbody>
@@ -301,8 +365,8 @@
 
     <div class="panel">
       <h2>
-        <span>4. Riwayat Audit Eksekusi (Tersimpan Permanen di SQLite)</span>
-        <span style="font-size:12px;color:var(--muted);">Menampilkan 100 aktivitas checklist terakhir</span>
+        <span>4. Riwayat Audit Eksekusi</span>
+        <span style="font-size:12px;color:var(--muted);">Menampilkan 100 aktivitas checklist terakhir Anda</span>
       </h2>
       <div class="table-wrap">
         <table>
@@ -327,11 +391,110 @@
     </div>
   </div>
 
+  <!-- Modal Ganti Password -->
+  <div id="changePassModal" class="modal-backdrop">
+    <div class="modal-content" style="max-width:420px;">
+      <div class="modal-header">
+        <h3>Ganti Password Akun</h3>
+        <button class="modal-close" onclick="closeChangePasswordModal()">&times;</button>
+      </div>
+      <form onsubmit="submitChangePassword(event)">
+        <div style="margin-bottom:14px;">
+          <label>Password Lama</label>
+          <input type="password" id="oldPassInput" required />
+        </div>
+        <div style="margin-bottom:14px;">
+          <label>Password Baru (Minimal 8 karakter)</label>
+          <input type="password" id="newPassInput" minlength="8" required />
+        </div>
+        <div style="margin-bottom:18px;">
+          <label>Konfirmasi Password Baru</label>
+          <input type="password" id="confirmPassInput" minlength="8" required />
+        </div>
+        <div class="btn-row" style="justify-content:flex-end;">
+          <button type="button" class="btn-secondary" onclick="closeChangePasswordModal()">Batal</button>
+          <button type="submit" class="btn-primary">Simpan Password Baru</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Modal Manajemen Pengguna (Admin) -->
+  <div id="adminModal" class="modal-backdrop">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Manajemen Pengguna (Admin RBAC)</h3>
+        <button class="modal-close" onclick="closeAdminModal()">&times;</button>
+      </div>
+
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px;">
+        <p style="font-size:13px; color:var(--muted);">Kelola akses sesama guru untuk login ke platform ini.</p>
+        <button class="btn-success" style="font-size:12.5px; padding:6px 12px;" onclick="toggleNewUserForm()">+ Tambah Guru Baru</button>
+      </div>
+
+      <!-- Form Tambah Guru Baru (Collapsible) -->
+      <div id="newUserFormWrap" style="display:none; background:#0f172a; padding:16px; border-radius:10px; border:1px solid var(--border); margin-bottom:16px;">
+        <h4 style="font-size:14px; margin-bottom:12px; color:var(--yellow);">Tambah Akun Pengguna Baru</h4>
+        <form onsubmit="submitCreateUser(event)">
+          <div class="form-grid" style="margin-bottom:12px;">
+            <div>
+              <label>Username</label>
+              <input type="text" id="newUsername" placeholder="mis. budi_guru" required />
+            </div>
+            <div>
+              <label>Nama Lengkap / Tampilan</label>
+              <input type="text" id="newDisplayName" placeholder="mis. Budi Santoso" required />
+            </div>
+            <div>
+              <label>Role</label>
+              <select id="newRole">
+                <option value="teacher">Teacher (Guru)</option>
+                <option value="admin">Administrator</option>
+              </select>
+            </div>
+            <div>
+              <label>Password Awal (Min 8 karakter)</label>
+              <input type="password" id="newPassword" minlength="8" required />
+            </div>
+          </div>
+          <div class="btn-row" style="justify-content:flex-end;">
+            <button type="button" class="btn-secondary" style="font-size:12.5px;" onclick="toggleNewUserForm()">Batal</button>
+            <button type="submit" class="btn-primary" style="font-size:12.5px;">Buat Akun</button>
+          </div>
+        </form>
+      </div>
+
+      <!-- Tabel Daftar Pengguna -->
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Pengguna</th>
+              <th>Role</th>
+              <th>Status</th>
+              <th>Aksi</th>
+            </tr>
+          </thead>
+          <tbody id="adminUsersBody">
+            <tr>
+              <td colspan="5" style="text-align:center;padding:20px;color:var(--muted);">Memuat pengguna...</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
   <script>
     let currentItems = [];
     let cronEnabled = false;
+    let currentUserRole = 'teacher';
+    let currentUserID = 0;
 
-    async function apiFetch(url, options) {
+    async function apiFetch(url, options = {}) {
+      options.headers = options.headers || {};
+      options.headers['X-Requested-With'] = 'XMLHttpRequest';
       const res = await fetch(url, options);
       if (res.status === 401) {
         window.location.href = '/login';
@@ -344,15 +507,29 @@
       try {
         const res = await apiFetch('/api/status');
         const data = await res.json();
-        document.getElementById('currentUser').textContent = data.currentUser || 'admin';
+        
+        const username = data.displayName || data.currentUser || 'user';
+        document.getElementById('currentUser').textContent = username;
+        currentUserRole = data.role || 'teacher';
+        
+        const roleBadge = document.getElementById('userRoleBadge');
+        roleBadge.textContent = currentUserRole;
+        if (currentUserRole === 'admin') {
+          roleBadge.className = 'role-badge admin';
+          document.getElementById('btnAdminUsers').style.display = 'inline-flex';
+        } else {
+          roleBadge.className = 'role-badge';
+          document.getElementById('btnAdminUsers').style.display = 'none';
+        }
+
         const dot = document.getElementById('authDot');
         const txt = document.getElementById('authText');
         if (data.authenticated) {
           dot.className = 'dot ok';
-          txt.textContent = 'Sesi Algonova Aktif';
+          txt.textContent = 'Sesi Algonova Anda Aktif';
         } else {
           dot.className = 'dot warn';
-          txt.textContent = 'Algonova Perlu Login/Cookie';
+          txt.textContent = 'Algonova Anda Perlu Cookie';
         }
         document.getElementById('globalUnreviewedCount').textContent = data.unreviewedGlobalCount ?? '-';
 
@@ -362,12 +539,12 @@
         const cBtn = document.getElementById('btnToggleCron');
         if (cronEnabled) {
           cDot.className = 'dot ok';
-          cTxt.textContent = 'Scheduler: Aktif (' + data.cronInterval + ')';
-          cBtn.textContent = 'Matikan Cron';
+          cTxt.textContent = 'Scheduler Saya: Aktif (' + data.cronInterval + ')';
+          cBtn.textContent = 'Matikan Cron Saya';
         } else {
           cDot.className = 'dot';
           cTxt.textContent = 'Scheduler: Off';
-          cBtn.textContent = 'Aktifkan Cron';
+          cBtn.textContent = 'Aktifkan Cron Saya';
         }
         if (data.cronInterval) document.getElementById('cronInterval').value = data.cronInterval;
         document.getElementById('cronAutoExec').checked = !!data.cronAutoExec;
@@ -386,7 +563,7 @@
         const items = data.history || [];
         const tbody = document.getElementById('historyBody');
         if (items.length === 0) {
-          tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:20px;">Belum ada riwayat eksekusi di database SQLite.</td></tr>`;
+          tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:20px;">Belum ada riwayat eksekusi pada akun Anda.</td></tr>`;
           return;
         }
         tbody.innerHTML = items.map(h => `
@@ -455,7 +632,7 @@
       document.getElementById('foundCount').textContent = currentItems.length;
       const tbody = document.getElementById('tasksBody');
       if (currentItems.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:28px;">Tidak ditemukan tugas kuning (student_success) pada filter ini.</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:28px;">Tidak ditemukan tugas kuning (student_success) pada filter akun Anda.</td></tr>`;
         updateActionButtons();
         return;
       }
@@ -522,7 +699,7 @@
       if (keys.length === 0) return;
 
       if (!dryRun) {
-        const ok = confirm(`KONFIRMASI EKSEKUSI:\n\nAnda akan mengirim request POST untuk menceklis (Approve) ${keys.length} level tugas kuning ke LMS Algonova.\n\nLanjutkan?`);
+        const ok = confirm(`KONFIRMASI EKSEKUSI:\n\nAnda akan mengirim request POST untuk menceklis (Approve) ${keys.length} level tugas kuning ke LMS Algonova akun Anda.\n\nLanjutkan?`);
         if (!ok) return;
       }
 
@@ -573,7 +750,7 @@
     }
 
     async function promptUpdateCookie() {
-      const raw = prompt('Masukkan string Cookie Algonova baru (contoh: _backendMainSessionId=...; accessToken=...)\nAtau kosongkan jika hanya ingin trigger Re-Login otomatis:');
+      const raw = prompt('Masukkan string Cookie Algonova akun Anda (contoh: _backendMainSessionId=...; accessToken=...)\nCookie ini disimpan eksklusif untuk akun Anda:');
       if (raw === null) return;
       try {
         const res = await apiFetch('/api/algonova-session', {
@@ -583,13 +760,196 @@
         });
         const data = await res.json();
         if (!res.ok) {
-          alert('Gagal memperbarui sesi Algonova: ' + (data.error || res.statusText));
+          alert('Gagal memperbarui sesi Algonova Anda: ' + (data.error || res.statusText));
           return;
         }
-        alert('Sesi Algonova berhasil diperbarui dan disimpan ke SQLite! Unreviewed Count: ' + data.unreviewedGlobalCount);
+        alert('Sesi Algonova akun Anda berhasil diperbarui dan disimpan! Unreviewed Count: ' + data.unreviewedGlobalCount);
         await refreshStatus();
       } catch (e) {
         alert('Error: ' + e.message);
+      }
+    }
+
+    // Modal Ganti Password
+    function openChangePasswordModal() {
+      document.getElementById('oldPassInput').value = '';
+      document.getElementById('newPassInput').value = '';
+      document.getElementById('confirmPassInput').value = '';
+      document.getElementById('changePassModal').style.display = 'flex';
+    }
+    function closeChangePasswordModal() {
+      document.getElementById('changePassModal').style.display = 'none';
+    }
+    async function submitChangePassword(e) {
+      e.preventDefault();
+      const oldPassword = document.getElementById('oldPassInput').value;
+      const newPassword = document.getElementById('newPassInput').value;
+      const confirmPassword = document.getElementById('confirmPassInput').value;
+
+      if (newPassword !== confirmPassword) {
+        alert('Konfirmasi password baru tidak cocok!');
+        return;
+      }
+      try {
+        const res = await apiFetch('/api/user/change-password', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ oldPassword, newPassword })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          alert('Gagal mengganti password: ' + (data.error || res.statusText));
+          return;
+        }
+        alert('Password Anda berhasil diperbarui!');
+        closeChangePasswordModal();
+      } catch (err) {
+        alert('Error: ' + err.message);
+      }
+    }
+
+    // Modal Admin Manajemen Pengguna
+    function openAdminModal() {
+      document.getElementById('adminModal').style.display = 'flex';
+      document.getElementById('newUserFormWrap').style.display = 'none';
+      loadAdminUsers();
+    }
+    function closeAdminModal() {
+      document.getElementById('adminModal').style.display = 'none';
+    }
+    function toggleNewUserForm() {
+      const wrap = document.getElementById('newUserFormWrap');
+      wrap.style.display = (wrap.style.display === 'none') ? 'block' : 'none';
+    }
+
+    async function loadAdminUsers() {
+      try {
+        const res = await apiFetch('/api/admin/users');
+        const data = await res.json();
+        const tbody = document.getElementById('adminUsersBody');
+        const users = data.users || [];
+        tbody.innerHTML = users.map(u => `
+          <tr>
+            <td>#${u.id}</td>
+            <td>
+              <div><strong>${escapeHtml(u.username)}</strong></div>
+              <div class="sub-muted">${escapeHtml(u.displayName)}</div>
+            </td>
+            <td><span class="role-badge ${u.role === 'admin' ? 'admin' : ''}">${u.role}</span></td>
+            <td>
+              <span style="font-weight:600;font-size:12px;color:${u.isActive ? 'var(--green)' : 'var(--danger)'};">
+                ${u.isActive ? '● Aktif' : '○ Nonaktif'}
+              </span>
+            </td>
+            <td>
+              <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                <button class="btn-secondary" style="padding:4px 8px;font-size:11.5px;" onclick="adminResetPassword(${u.id}, '${escapeHtml(u.username)}')">Reset Pass</button>
+                <button class="btn-secondary" style="padding:4px 8px;font-size:11.5px;" onclick="adminToggleActive(${u.id}, '${escapeHtml(u.username)}', ${u.isActive})">
+                  ${u.isActive ? 'Nonaktifkan' : 'Aktifkan'}
+                </button>
+                <button class="btn-danger" style="padding:4px 8px;font-size:11.5px;" onclick="adminDeleteUser(${u.id}, '${escapeHtml(u.username)}')">Hapus</button>
+              </div>
+            </td>
+          </tr>
+        `).join('');
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    async function submitCreateUser(e) {
+      e.preventDefault();
+      const username = document.getElementById('newUsername').value;
+      const displayName = document.getElementById('newDisplayName').value;
+      const role = document.getElementById('newRole').value;
+      const password = document.getElementById('newPassword').value;
+
+      try {
+        const res = await apiFetch('/api/admin/users', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ username, displayName, role, password })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          alert('Gagal membuat akun: ' + (data.error || res.statusText));
+          return;
+        }
+        alert(`Akun untuk ${data.user.displayName} (${data.user.username}) berhasil dibuat!`);
+        document.getElementById('newUsername').value = '';
+        document.getElementById('newDisplayName').value = '';
+        document.getElementById('newPassword').value = '';
+        toggleNewUserForm();
+        loadAdminUsers();
+      } catch (err) {
+        alert('Error: ' + err.message);
+      }
+    }
+
+    async function adminResetPassword(userId, username) {
+      const newPassword = prompt(`Masukkan password baru untuk pengguna "${username}" (minimal 8 karakter):`);
+      if (!newPassword) return;
+      if (newPassword.length < 8) {
+        alert('Password baru minimal 8 karakter!');
+        return;
+      }
+      try {
+        const res = await apiFetch('/api/admin/users/reset-password', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ userId, newPassword })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          alert('Gagal reset password: ' + (data.error || res.statusText));
+          return;
+        }
+        alert(`Password untuk ${username} berhasil di-reset!`);
+      } catch (err) {
+        alert('Error: ' + err.message);
+      }
+    }
+
+    async function adminToggleActive(userId, username, currentStatus) {
+      const nextStatus = !currentStatus;
+      const actionLabel = nextStatus ? 'mengaktifkan' : 'menonaktifkan';
+      if (!confirm(`Apakah Anda yakin ingin ${actionLabel} akun "${username}"?`)) return;
+
+      try {
+        const res = await apiFetch('/api/admin/users/toggle-active', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ userId, isActive: nextStatus })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          alert('Gagal mengubah status: ' + (data.error || res.statusText));
+          return;
+        }
+        loadAdminUsers();
+      } catch (err) {
+        alert('Error: ' + err.message);
+      }
+    }
+
+    async function adminDeleteUser(userId, username) {
+      if (!confirm(`PERINGATAN HAPUS AKUN:\n\nApakah Anda yakin ingin menghapus akun "${username}" beserta seluruh data cookie, riwayat, dan pengaturannya secara permanen?`)) return;
+
+      try {
+        const res = await apiFetch('/api/admin/users/delete', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ userId })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          alert('Gagal menghapus user: ' + (data.error || res.statusText));
+          return;
+        }
+        alert(`Akun "${username}" berhasil dihapus.`);
+        loadAdminUsers();
+      } catch (err) {
+        alert('Error: ' + err.message);
       }
     }
 
