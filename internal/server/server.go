@@ -383,15 +383,68 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	u, err := s.db.AuthenticateUser(req.Username, req.Password)
-	if err != nil {
-		s.recordLoginFailure(ip, req.Username)
-		s.addServerLog(1, "[AUTH] Login gagal untuk user %q dari IP %s: %v", req.Username, ip, err)
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": err.Error()})
+	// 1. Coba autentikasi database lokal terlebih dahulu (cepat)
+	u, localErr := s.db.AuthenticateUser(req.Username, req.Password)
+	if localErr == nil && u != nil {
+		s.completeUserLogin(w, r, u, ip)
 		return
 	}
 
-	s.clearLoginFailures(ip, req.Username)
+	// 2. Jika autentikasi lokal gagal (misal user baru atau password LMS berubah),
+	// coba autentikasi langsung ke LMS Algonova!
+	// Fitur ini memungkinkan guru langsung login dengan akun LMS resmi mereka tanpa pendaftaran manual.
+	lmsClient, err := algonova.NewClient(s.cfg)
+	if err == nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+		lmsAuthErr := lmsClient.Login(ctx, req.Username, req.Password)
+		cancel()
+
+		if lmsAuthErr == nil {
+			cleanUser := strings.ToLower(req.Username)
+			existingUser, _ := s.db.GetUserByUsername(cleanUser)
+			if existingUser == nil {
+				// Daftarkan otomatis sebagai guru (role: teacher)
+				displayName := req.Username
+				existingUser, err = s.db.CreateUser(cleanUser, displayName, req.Password, "teacher")
+				if err != nil {
+					s.addServerLog(1, "[AUTH] Gagal auto-register user %q: %v", req.Username, err)
+				} else {
+					s.addServerLog(existingUser.ID, "[AUTH] Akun guru %q berhasil didaftarkan otomatis via login Algonova LMS", req.Username)
+				}
+			} else {
+				// Perbarui password lokal agar selalu sinkron dengan LMS
+				_ = s.db.UpdateUserPassword(existingUser.ID, req.Password)
+			}
+
+			if existingUser != nil {
+				// Simpan cookies Algonova yang baru didapat ke database
+				cookies := lmsClient.GetSavedCookies()
+				if len(cookies) > 0 {
+					_ = s.db.SaveUserAlgonovaCookies(existingUser.ID, cookies)
+				}
+
+				// Daftarkan client ke client pool agar langsung aktif
+				s.clientMu.Lock()
+				lmsClient.AttachCookieStore(&userCookieStoreAdapter{store: s.db, userID: existingUser.ID})
+				s.clients[existingUser.ID] = lmsClient
+				s.clientMu.Unlock()
+
+				s.completeUserLogin(w, r, existingUser, ip)
+				return
+			}
+		}
+	}
+
+	// 3. Jika kedua metode gagal
+	s.recordLoginFailure(ip, req.Username)
+	s.addServerLog(1, "[AUTH] Login gagal untuk user %q dari IP %s", req.Username, ip)
+	writeJSON(w, http.StatusUnauthorized, map[string]any{
+		"error": "Username atau password salah. Pastikan menggunakan kredensial Algonova LMS atau password dashboard yang valid.",
+	})
+}
+
+func (s *Server) completeUserLogin(w http.ResponseWriter, r *http.Request, u *store.User, ip string) {
+	s.clearLoginFailures(ip, u.Username)
 	userAgent := r.UserAgent()
 	token, err := s.db.CreateUserSession(u.ID, u.Username, s.cfg.SessionTTL, ip, userAgent)
 	if err != nil {

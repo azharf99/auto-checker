@@ -201,6 +201,21 @@ func (c *Client) PersistCookies() error {
 	return nil
 }
 
+// GetSavedCookies mengembalikan seluruh cookie aktif saat ini dalam bentuk []SavedCookie.
+func (c *Client) GetSavedCookies() []SavedCookie {
+	cookies := c.httpClient.Jar.Cookies(c.baseURL)
+	var saved []SavedCookie
+	for _, ck := range cookies {
+		saved = append(saved, SavedCookie{
+			Name:   ck.Name,
+			Value:  ck.Value,
+			Domain: c.baseURL.Hostname(),
+			Path:   "/",
+		})
+	}
+	return saved
+}
+
 // SaveCookiesToFile menyimpan cookie aktif saat ini ke SQLite & file JSON agar sesi bertahan antar-run.
 func (c *Client) SaveCookiesToFile(path string) error {
 	return c.PersistCookies()

@@ -89,6 +89,26 @@ func NewSQLiteStore(dbPath string) (*Store, error) {
 	return s, nil
 }
 
+func parseDBTime(ns sql.NullString) time.Time {
+	if !ns.Valid || strings.TrimSpace(ns.String) == "" {
+		return time.Now().UTC()
+	}
+	s := strings.TrimSpace(ns.String)
+	layouts := []string{
+		time.RFC3339,
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05Z",
+		"2006-01-02T15:04:05",
+		"2006-01-02",
+	}
+	for _, l := range layouts {
+		if t, err := time.Parse(l, s); err == nil {
+			return t
+		}
+	}
+	return time.Now().UTC()
+}
+
 func (s *Store) Close() error {
 	if s.db != nil {
 		return s.db.Close()
@@ -201,8 +221,13 @@ func (s *Store) migrate() error {
 		_, _ = s.db.Exec(`ALTER TABLE users ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1`)
 	}
 	if has, _ := hasColumn(s.db, "users", "created_at"); !has {
-		_, _ = s.db.Exec(`ALTER TABLE users ADD COLUMN created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP`)
+		_, _ = s.db.Exec(`ALTER TABLE users ADD COLUMN created_at DATETIME DEFAULT '2026-01-01 00:00:00'`)
 	}
+
+	// Backfill existing user records
+	_, _ = s.db.Exec(`UPDATE users SET created_at = CURRENT_TIMESTAMP WHERE created_at IS NULL OR created_at = ''`)
+	_, _ = s.db.Exec(`UPDATE users SET updated_at = CURRENT_TIMESTAMP WHERE updated_at IS NULL OR updated_at = ''`)
+	_, _ = s.db.Exec(`UPDATE users SET role = 'admin' WHERE id = 1 AND (role IS NULL OR role = '' OR role = 'teacher')`)
 
 	if has, _ := hasColumn(s.db, "dashboard_sessions", "user_id"); !has {
 		_, _ = s.db.Exec(`ALTER TABLE dashboard_sessions ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1`)
@@ -261,22 +286,24 @@ func (s *Store) EnsureAdminUser(username, plainPassword string) (*User, error) {
 
 	var u User
 	var existingHash string
+	var role, disp sql.NullString
+	var isActive sql.NullInt64
+	var created, updated sql.NullString
 	now := time.Now().UTC()
 	err := s.db.QueryRow(`
-		SELECT id, username, password_hash, role, display_name, is_active, created_at, updated_at
+		SELECT id, username, password_hash, COALESCE(role, 'admin'), COALESCE(display_name, username),
+		       COALESCE(is_active, 1), created_at, updated_at
 		FROM users WHERE username = ?
-	`, username).Scan(&u.ID, &u.Username, &existingHash, &u.Role, &u.DisplayName, &u.IsActive, &u.CreatedAt, &u.UpdatedAt)
+	`, username).Scan(&u.ID, &u.Username, &existingHash, &role, &disp, &isActive, &created, &updated)
 
 	if err == nil {
 		// User sudah ada, verifikasi apakah password cocok
 		if bcrypt.CompareHashAndPassword([]byte(existingHash), []byte(plainPassword)) == nil {
 			// Pastikan role tetap admin dan aktif
-			if u.Role != "admin" || !u.IsActive {
+			if role.String != "admin" || isActive.Int64 != 1 {
 				_, _ = s.db.Exec(`UPDATE users SET role = 'admin', is_active = 1, updated_at = ? WHERE id = ?`, now, u.ID)
-				u.Role = "admin"
-				u.IsActive = true
 			}
-			return &u, nil
+			return s.GetUserByID(u.ID)
 		}
 	}
 
@@ -286,8 +313,8 @@ func (s *Store) EnsureAdminUser(username, plainPassword string) (*User, error) {
 	}
 
 	displayName := username
-	if u.DisplayName != "" {
-		displayName = u.DisplayName
+	if disp.Valid && disp.String != "" {
+		displayName = disp.String
 	}
 
 	res, err := s.db.Exec(`
@@ -315,23 +342,30 @@ func (s *Store) AuthenticateUser(username, plainPassword string) (*User, error) 
 	username = strings.ToLower(strings.TrimSpace(username))
 	var u User
 	var hash string
-	var isActive int
+	var role, disp sql.NullString
+	var isActive sql.NullInt64
+	var created, updated sql.NullString
 	err := s.db.QueryRow(`
-		SELECT id, username, password_hash, role, display_name, is_active, created_at, updated_at
+		SELECT id, username, password_hash, COALESCE(role, 'teacher'), COALESCE(display_name, username),
+		       COALESCE(is_active, 1), created_at, updated_at
 		FROM users WHERE username = ?
-	`, username).Scan(&u.ID, &u.Username, &hash, &u.Role, &u.DisplayName, &isActive, &u.CreatedAt, &u.UpdatedAt)
+	`, username).Scan(&u.ID, &u.Username, &hash, &role, &disp, &isActive, &created, &updated)
 	if err != nil {
 		return nil, errors.New("username atau password salah")
 	}
 
-	if isActive != 1 {
+	if isActive.Int64 != 1 {
 		return nil, errors.New("akun Anda telah dinonaktifkan oleh administrator")
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(plainPassword)); err != nil {
 		return nil, errors.New("username atau password salah")
 	}
+	u.Role = role.String
+	u.DisplayName = disp.String
 	u.IsActive = true
+	u.CreatedAt = parseDBTime(created)
+	u.UpdatedAt = parseDBTime(updated)
 	return &u, nil
 }
 
@@ -344,15 +378,22 @@ func (s *Store) VerifyUser(username, plainPassword string) bool {
 // GetUserByID mengambil user berdasarkan ID.
 func (s *Store) GetUserByID(id int64) (*User, error) {
 	var u User
-	var isActive int
+	var role, disp sql.NullString
+	var isActive sql.NullInt64
+	var created, updated sql.NullString
 	err := s.db.QueryRow(`
-		SELECT id, username, role, display_name, is_active, created_at, updated_at
+		SELECT id, username, COALESCE(role, 'teacher'), COALESCE(display_name, username),
+		       COALESCE(is_active, 1), created_at, updated_at
 		FROM users WHERE id = ?
-	`, id).Scan(&u.ID, &u.Username, &u.Role, &u.DisplayName, &isActive, &u.CreatedAt, &u.UpdatedAt)
+	`, id).Scan(&u.ID, &u.Username, &role, &disp, &isActive, &created, &updated)
 	if err != nil {
 		return nil, err
 	}
-	u.IsActive = isActive == 1
+	u.Role = role.String
+	u.DisplayName = disp.String
+	u.IsActive = isActive.Int64 == 1
+	u.CreatedAt = parseDBTime(created)
+	u.UpdatedAt = parseDBTime(updated)
 	return &u, nil
 }
 
@@ -360,22 +401,30 @@ func (s *Store) GetUserByID(id int64) (*User, error) {
 func (s *Store) GetUserByUsername(username string) (*User, error) {
 	username = strings.ToLower(strings.TrimSpace(username))
 	var u User
-	var isActive int
+	var role, disp sql.NullString
+	var isActive sql.NullInt64
+	var created, updated sql.NullString
 	err := s.db.QueryRow(`
-		SELECT id, username, role, display_name, is_active, created_at, updated_at
+		SELECT id, username, COALESCE(role, 'teacher'), COALESCE(display_name, username),
+		       COALESCE(is_active, 1), created_at, updated_at
 		FROM users WHERE username = ?
-	`, username).Scan(&u.ID, &u.Username, &u.Role, &u.DisplayName, &isActive, &u.CreatedAt, &u.UpdatedAt)
+	`, username).Scan(&u.ID, &u.Username, &role, &disp, &isActive, &created, &updated)
 	if err != nil {
 		return nil, err
 	}
-	u.IsActive = isActive == 1
+	u.Role = role.String
+	u.DisplayName = disp.String
+	u.IsActive = isActive.Int64 == 1
+	u.CreatedAt = parseDBTime(created)
+	u.UpdatedAt = parseDBTime(updated)
 	return &u, nil
 }
 
 // ListUsers mengambil seluruh daftar user untuk keperluan panel admin.
 func (s *Store) ListUsers() ([]User, error) {
 	rows, err := s.db.Query(`
-		SELECT id, username, role, display_name, is_active, created_at, updated_at
+		SELECT id, username, COALESCE(role, 'teacher'), COALESCE(display_name, username),
+		       COALESCE(is_active, 1), created_at, updated_at
 		FROM users ORDER BY id ASC
 	`)
 	if err != nil {
@@ -386,11 +435,17 @@ func (s *Store) ListUsers() ([]User, error) {
 	var users []User
 	for rows.Next() {
 		var u User
-		var isActive int
-		if err := rows.Scan(&u.ID, &u.Username, &u.Role, &u.DisplayName, &isActive, &u.CreatedAt, &u.UpdatedAt); err != nil {
+		var role, disp sql.NullString
+		var isActive sql.NullInt64
+		var created, updated sql.NullString
+		if err := rows.Scan(&u.ID, &u.Username, &role, &disp, &isActive, &created, &updated); err != nil {
 			return nil, err
 		}
-		u.IsActive = isActive == 1
+		u.Role = role.String
+		u.DisplayName = disp.String
+		u.IsActive = isActive.Int64 == 1
+		u.CreatedAt = parseDBTime(created)
+		u.UpdatedAt = parseDBTime(updated)
 		users = append(users, u)
 	}
 	return users, rows.Err()
@@ -538,14 +593,17 @@ func (s *Store) ValidateUserSession(token string) (*User, bool) {
 		return nil, false
 	}
 	var u User
-	var isActive int
+	var role, disp sql.NullString
+	var isActive sql.NullInt64
+	var created, updated sql.NullString
 	var expiresAt time.Time
 	err := s.db.QueryRow(`
-		SELECT u.id, u.username, u.role, u.display_name, u.is_active, u.created_at, u.updated_at, s.expires_at
+		SELECT u.id, u.username, COALESCE(u.role, 'teacher'), COALESCE(u.display_name, u.username),
+		       COALESCE(u.is_active, 1), u.created_at, u.updated_at, s.expires_at
 		FROM dashboard_sessions s
 		JOIN users u ON s.user_id = u.id
 		WHERE s.token = ?
-	`, token).Scan(&u.ID, &u.Username, &u.Role, &u.DisplayName, &isActive, &u.CreatedAt, &u.UpdatedAt, &expiresAt)
+	`, token).Scan(&u.ID, &u.Username, &role, &disp, &isActive, &created, &updated, &expiresAt)
 	if err != nil {
 		return nil, false
 	}
@@ -555,12 +613,16 @@ func (s *Store) ValidateUserSession(token string) (*User, bool) {
 		return nil, false
 	}
 
-	if isActive != 1 {
+	if isActive.Int64 != 1 {
 		_, _ = s.db.Exec(`DELETE FROM dashboard_sessions WHERE token = ?`, token)
 		return nil, false
 	}
 
+	u.Role = role.String
+	u.DisplayName = disp.String
 	u.IsActive = true
+	u.CreatedAt = parseDBTime(created)
+	u.UpdatedAt = parseDBTime(updated)
 	return &u, true
 }
 
