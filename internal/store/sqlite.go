@@ -274,6 +274,11 @@ func (s *Store) migrate() error {
 		}
 	}
 
+	// Default scheduler ON & Auto-Exec ON untuk user 1
+	_, _ = s.db.Exec(`INSERT OR IGNORE INTO user_settings (user_id, key, value, updated_at) VALUES (1, 'cron_enabled', 'true', CURRENT_TIMESTAMP)`)
+	_, _ = s.db.Exec(`INSERT OR IGNORE INTO user_settings (user_id, key, value, updated_at) VALUES (1, 'cron_auto_exec', 'true', CURRENT_TIMESTAMP)`)
+	_, _ = s.db.Exec(`INSERT OR IGNORE INTO user_settings (user_id, key, value, updated_at) VALUES (1, 'cron_interval', '1h', CURRENT_TIMESTAMP)`)
+
 	return nil
 }
 
@@ -488,6 +493,9 @@ func (s *Store) CreateUser(username, displayName, plainPassword, role string) (*
 	if err != nil {
 		return nil, err
 	}
+	_ = s.SetUserSetting(id, "cron_enabled", "true")
+	_ = s.SetUserSetting(id, "cron_auto_exec", "true")
+	_ = s.SetUserSetting(id, "cron_interval", "1h")
 	return s.GetUserByID(id)
 }
 
@@ -740,13 +748,13 @@ func (s *Store) GetSetting(key, fallback string) string {
 	return s.GetUserSetting(1, key, fallback)
 }
 
-// ListUsersWithCronEnabled mengambil ID semua user aktif yang mengaktifkan scheduler otomatis.
+// ListUsersWithCronEnabled mengambil ID semua user aktif yang mengaktifkan scheduler otomatis (default true jika belum diset).
 func (s *Store) ListUsersWithCronEnabled() ([]int64, error) {
 	rows, err := s.db.Query(`
-		SELECT s.user_id
-		FROM user_settings s
-		JOIN users u ON s.user_id = u.id
-		WHERE u.is_active = 1 AND s.key = 'cron_enabled' AND s.value = 'true'
+		SELECT u.id
+		FROM users u
+		LEFT JOIN user_settings s ON u.id = s.user_id AND s.key = 'cron_enabled'
+		WHERE u.is_active = 1 AND (s.value IS NULL OR s.value != 'false')
 	`)
 	if err != nil {
 		return nil, err

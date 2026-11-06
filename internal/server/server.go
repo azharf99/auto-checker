@@ -505,9 +505,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request, u *store.U
 	unreviewedCount, err := client.EnsureAuthenticated(ctx)
 	authOK := err == nil
 
-	cronEnabled := s.db.GetUserSetting(u.ID, "cron_enabled", "false") == "true"
-	cronInterval := s.db.GetUserSetting(u.ID, "cron_interval", "6h")
-	cronAutoExec := s.db.GetUserSetting(u.ID, "cron_auto_exec", "false") == "true"
+	cronEnabled := s.db.GetUserSetting(u.ID, "cron_enabled", "true") == "true"
+	cronInterval := s.db.GetUserSetting(u.ID, "cron_interval", "1h")
+	cronAutoExec := s.db.GetUserSetting(u.ID, "cron_auto_exec", "true") == "true"
 
 	logs, _ := s.db.GetUserRecentLogs(u.ID, 150)
 	var logEntries []LogEntry
@@ -587,9 +587,14 @@ type scanRequest struct {
 
 func (s *Server) handleScan(w http.ResponseWriter, r *http.Request, u *store.User) {
 	var req scanRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
-		return
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&req)
+	}
+	if req.Mode == "" {
+		req.Mode = "unreviewed"
+	}
+	if req.Timeframe == "" {
+		req.Timeframe = "current"
 	}
 
 	client, err := s.getClientForUser(u.ID)
@@ -605,7 +610,7 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request, u *store.Use
 	}
 
 	gids := config.ParseGroupIDs(req.GroupIDs)
-	s.addServerLog(u.ID, "Memulai scan Read-Only (mode=%s, groupIds=%v, timeframe=%s)...", req.Mode, gids, req.Timeframe)
+	s.addServerLog(u.ID, "Memeriksa daftar tugas yang menunggu checklist...")
 
 	items, err := client.Discover(r.Context(), algonova.DiscoverOptions{
 		Mode:          req.Mode,
@@ -940,10 +945,10 @@ func (s *Server) runScheduledChecks() {
 
 	now := time.Now()
 	for _, uid := range userIDs {
-		intervalStr := s.db.GetUserSetting(uid, "cron_interval", "6h")
+		intervalStr := s.db.GetUserSetting(uid, "cron_interval", "1h")
 		dur, err := time.ParseDuration(intervalStr)
 		if err != nil || dur < 10*time.Minute {
-			dur = 6 * time.Hour
+			dur = 1 * time.Hour
 		}
 
 		lastRunStr := s.db.GetUserSetting(uid, "cron_last_run", "")
@@ -956,7 +961,7 @@ func (s *Server) runScheduledChecks() {
 		}
 
 		_ = s.db.SetUserSetting(uid, "cron_last_run", now.Format(time.RFC3339))
-		autoExec := s.db.GetUserSetting(uid, "cron_auto_exec", "false") == "true"
+		autoExec := s.db.GetUserSetting(uid, "cron_auto_exec", "true") == "true"
 		s.executeUserCron(uid, autoExec)
 	}
 }

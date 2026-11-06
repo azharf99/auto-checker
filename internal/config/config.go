@@ -72,9 +72,9 @@ func Load(envPath string) *Config {
 		LevelDelay:    time.Duration(getEnvInt("LEVEL_DELAY_MS", 1500)) * time.Millisecond,
 		MaxRetries:    getEnvInt("MAX_RETRIES", 5),
 		ServerAddr:    getEnv("SERVER_ADDR", ":8080"),
-		CronInterval:  parseDuration(getEnv("CRON_INTERVAL", "6h"), 6*time.Hour),
-		EnableCron:    getEnvBool("ENABLE_CRON", false),
-		CronAutoExec:  getEnvBool("CRON_AUTO_EXECUTE", false),
+		CronInterval:  parseDuration(getEnv("CRON_INTERVAL", "1h"), 1*time.Hour),
+		EnableCron:    getEnvBool("ENABLE_CRON", true),
+		CronAutoExec:  getEnvBool("CRON_AUTO_EXECUTE", true),
 		SinglepageVer: getEnv("SINGLEPAGE_VERSION", "2026-10-20T08:30:38.752Z"),
 		UserAgent:     getEnv("USER_AGENT", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"),
 	}
