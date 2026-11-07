@@ -315,9 +315,59 @@
     }
     .log-line { margin-bottom: 4px; }
     .log-time { color: #64748b; margin-right: 6px; }
+
+    /* Toast Notification Center */
+    .toast-container {
+      position: fixed;
+      top: 24px;
+      right: 24px;
+      z-index: 99999;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      pointer-events: none;
+      max-width: 420px;
+      width: calc(100% - 48px);
+    }
+    .toast-item {
+      pointer-events: auto;
+      background: #1e293b;
+      color: #f8fafc;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 10px;
+      padding: 13px 16px;
+      box-shadow: 0 10px 25px -5px rgba(0,0,0,0.5), 0 8px 10px -6px rgba(0,0,0,0.4);
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      font-size: 13.5px;
+      line-height: 1.45;
+      animation: toastSlideIn 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+      border-left: 4px solid var(--purple);
+    }
+    .toast-item.toast-success { border-left-color: var(--green); }
+    .toast-item.toast-error { border-left-color: var(--danger); background: #221319; border-color: rgba(239, 68, 68, 0.3); }
+    .toast-item.toast-warning { border-left-color: var(--yellow); }
+    .toast-icon { font-size: 16px; flex-shrink: 0; margin-top: 1px; }
+    .toast-body { flex: 1; word-break: break-word; }
+    .toast-close {
+      background: none; border: none; color: var(--muted); cursor: pointer;
+      font-size: 14px; padding: 0 4px; line-height: 1;
+    }
+    .toast-close:hover { color: #fff; }
+    .toast-fadeout {
+      opacity: 0;
+      transform: translateY(-8px);
+      transition: opacity 0.3s ease, transform 0.3s ease;
+    }
+    @keyframes toastSlideIn {
+      from { opacity: 0; transform: translateX(25px); }
+      to { opacity: 1; transform: translateX(0); }
+    }
   </style>
 </head>
 <body>
+  <div id="toastContainer" class="toast-container"></div>
   <div class="container">
     <!-- Header -->
     <header>
@@ -595,15 +645,93 @@
     let cronInterval = '1h';
     let cronEnabled = true;
 
-    async function apiFetch(url, options = {}) {
+    // Toast Notification System
+    function showToast(msg, type = 'info', duration = 5000) {
+      const container = document.getElementById('toastContainer');
+      if (!container) return;
+      const toast = document.createElement('div');
+      toast.className = `toast-item toast-${type}`;
+
+      let icon = 'ℹ️';
+      if (type === 'success') icon = '✅';
+      if (type === 'error') icon = '⚠️';
+      if (type === 'warning') icon = '🔔';
+
+      toast.innerHTML = `
+        <span class="toast-icon">${icon}</span>
+        <div class="toast-body">${escapeHtml(msg)}</div>
+        <button class="toast-close" onclick="this.parentElement.remove()">✕</button>
+      `;
+      container.appendChild(toast);
+      setTimeout(() => {
+        toast.classList.add('toast-fadeout');
+        setTimeout(() => toast.remove(), 350);
+      }, duration);
+    }
+
+    // Resilient API Fetch Helper: Kebal terhadap format non-JSON, 502/504 HTML timeout, dan putus koneksi
+    async function apiFetchJSON(url, options = {}) {
       options.headers = options.headers || {};
       options.headers['X-Requested-With'] = 'XMLHttpRequest';
-      const res = await fetch(url, options);
-      if (res.status === 401) {
-        window.location.href = '/login';
+
+      let res;
+      try {
+        res = await fetch(url, options);
+      } catch (netErr) {
+        throw new Error('Gagal terhubung ke server. Periksa koneksi internet Anda atau coba beberapa saat lagi.');
+      }
+
+      // Sesi berakhir atau diarahkan ke login
+      if (res.status === 401 || (res.redirected && res.url && res.url.includes('/login'))) {
+        showToast('Sesi telah berakhir. Mengalihkan ke halaman login...', 'warning', 2500);
+        setTimeout(() => { window.location.href = '/login'; }, 1000);
         throw new Error('Sesi telah berakhir.');
       }
-      return res;
+
+      const contentType = (res.headers.get('content-type') || '').toLowerCase();
+      let data = null;
+
+      if (contentType.includes('application/json')) {
+        try {
+          data = await res.json();
+        } catch (jsonErr) {
+          const raw = await res.text().catch(() => '');
+          throw new Error(`Format respons JSON tidak valid dari server (Status ${res.status}): ${raw.slice(0, 100)}`);
+        }
+      } else {
+        // Respons Non-JSON (e.g. text/html dari Nginx 502/504, Cloudflare, atau proxy gateway)
+        const rawText = await res.text().catch(() => '');
+
+        if (rawText.includes('<html') || rawText.includes('<!DOCTYPE') || rawText.includes('<head')) {
+          const titleMatch = rawText.match(/<title[^>]*>([^<]+)<\/title>/i);
+          const pageTitle = titleMatch ? titleMatch[1].trim() : '';
+
+          if (res.status === 504 || rawText.toLowerCase().includes('gateway time-out') || rawText.toLowerCase().includes('timeout')) {
+            throw new Error('Waktu permintaan habis (504 Gateway Timeout). Pengecekan tugas membutuhkan waktu lebih lama di server. Jangan khawatir, proses tetap berjalan di background.');
+          } else if (res.status === 502 || rawText.toLowerCase().includes('502 bad gateway')) {
+            throw new Error('Koneksi server terputus sementara (502 Bad Gateway). Layanan sedang restart atau memuat ulang. Silakan coba 5 detik lagi.');
+          } else if (res.status === 503) {
+            throw new Error('Layanan server sedang sibuk (503 Service Unavailable). Silakan coba beberapa saat lagi.');
+          } else if (pageTitle) {
+            throw new Error(`Server mengembalikan respons web [${pageTitle}] (Status ${res.status}). Silakan muat ulang.`);
+          } else {
+            throw new Error(`Server mengembalikan respons HTML (Status ${res.status}). Silakan coba beberapa saat lagi.`);
+          }
+        }
+
+        if (rawText.trim()) {
+          data = { error: rawText.trim() };
+        } else {
+          data = { error: `Server mengembalikan status ${res.status} ${res.statusText}` };
+        }
+      }
+
+      if (!res.ok) {
+        const errMsg = (data && (data.error || data.message)) || `Permintaan gagal dengan status ${res.status}`;
+        throw new Error(errMsg);
+      }
+
+      return data;
     }
 
     async function initDashboard() {
@@ -613,8 +741,7 @@
 
     async function refreshStatus() {
       try {
-        const res = await apiFetch('/api/status');
-        const data = await res.json();
+        const data = await apiFetchJSON('/api/status');
 
         // User Profile
         const name = data.displayName || data.currentUser || 'Guru';
@@ -631,7 +758,7 @@
 
         // Stats Cards
         document.getElementById('statUnreviewed').textContent = data.unreviewedGlobalCount ?? 0;
-        
+
         cronEnabled = data.cronEnabled !== false;
         cronInterval = data.cronInterval || '1h';
         const cronStat = document.getElementById('statCron');
@@ -658,7 +785,7 @@
         renderLogs(data.logs || []);
         await loadHistory();
       } catch (err) {
-        console.error(err);
+        console.warn('Status refresh warning:', err.message);
       }
     }
 
@@ -671,22 +798,26 @@
       }
 
       try {
-        const res = await apiFetch('/api/scan', {
+        const data = await apiFetchJSON('/api/scan', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({ mode: 'unreviewed' })
         });
-        const data = await res.json();
-        if (!res.ok) {
-          if (!isSilent) alert('Gagal memeriksa tugas: ' + (data.error || res.statusText));
-          return;
-        }
         allScannedItems = data.items || [];
         renderTasks(allScannedItems);
         document.getElementById('statUnreviewed').textContent = allScannedItems.length;
         document.getElementById('lastCheckedTime').textContent = new Date().toLocaleTimeString('id-ID');
+        if (!isSilent) {
+          if (allScannedItems.length > 0) {
+            showToast(`Pemeriksaan selesai: Ditemukan ${allScannedItems.length} tugas yang perlu diceklis.`, 'info');
+          } else {
+            showToast('Semua tugas murid di kelas Anda telah selesai diceklis.', 'success');
+          }
+        }
       } catch (err) {
-        if (!isSilent) alert('Error: ' + err.message);
+        if (!isSilent) {
+          showToast(err.message, 'error');
+        }
       } finally {
         if (!isSilent) {
           btn.disabled = false;
@@ -799,16 +930,11 @@
       btn.innerHTML = `<span>⏳</span> Menceklis tugas...`;
 
       try {
-        const res = await apiFetch('/api/execute', {
+        const data = await apiFetchJSON('/api/execute', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({ keys, dryRun: false })
         });
-        const data = await res.json();
-        if (!res.ok) {
-          alert('Gagal mengeksekusi checklist: ' + (data.error || res.statusText));
-          return;
-        }
 
         if (data.results) {
           const okMap = {};
@@ -817,9 +943,9 @@
           filterTasks();
         }
         await refreshStatus();
-        alert(`Berhasil! ${data.succeeded}/${data.total} tugas telah diceklis menjadi Hijau.`);
+        showToast(`Berhasil! ${data.succeeded}/${data.total} tugas telah diceklis menjadi Hijau.`, 'success');
       } catch (err) {
-        alert('Error: ' + err.message);
+        showToast(err.message, 'error');
       } finally {
         updateApproveButton();
       }
@@ -827,8 +953,7 @@
 
     async function loadHistory() {
       try {
-        const res = await apiFetch('/api/history');
-        const data = await res.json();
+        const data = await apiFetchJSON('/api/history');
         const items = data.history || [];
         const tbody = document.getElementById('historyBody');
         if (items.length === 0) {
@@ -850,7 +975,7 @@
           </tr>
         `).join('');
       } catch (err) {
-        console.error(err);
+        console.warn('History load warning:', err.message);
       }
     }
 
@@ -888,21 +1013,16 @@
       const enabled = document.getElementById('cronEnabledCheck').checked;
       const interval = document.getElementById('cronIntervalSelect').value;
       try {
-        const res = await apiFetch('/api/scheduler', {
+        await apiFetchJSON('/api/scheduler', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({ enabled, interval, autoExecute: true })
         });
-        if (!res.ok) {
-          const data = await res.json();
-          alert('Gagal menyimpan: ' + (data.error || res.statusText));
-          return;
-        }
         closeSchedulerModal();
         await refreshStatus();
-        alert('Pengaturan otomasi berhasil disimpan!');
+        showToast('Pengaturan otomasi background berhasil disimpan!', 'success');
       } catch (err) {
-        alert('Error: ' + err.message);
+        showToast(err.message, 'error');
       }
     }
 
@@ -922,24 +1042,19 @@
       const confirmPassword = document.getElementById('confirmPassInput').value;
 
       if (newPassword !== confirmPassword) {
-        alert('Konfirmasi password baru tidak cocok!');
+        showToast('Konfirmasi password baru tidak cocok!', 'warning');
         return;
       }
       try {
-        const res = await apiFetch('/api/user/change-password', {
+        await apiFetchJSON('/api/user/change-password', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({ oldPassword, newPassword })
         });
-        const data = await res.json();
-        if (!res.ok) {
-          alert('Gagal: ' + (data.error || res.statusText));
-          return;
-        }
-        alert('Password berhasil diubah!');
+        showToast('Password akun berhasil diubah!', 'success');
         closeChangePasswordModal();
       } catch (err) {
-        alert('Error: ' + err.message);
+        showToast(err.message, 'error');
       }
     }
 
@@ -957,8 +1072,7 @@
     }
     async function loadAdminUsers() {
       try {
-        const res = await apiFetch('/api/admin/users');
-        const data = await res.json();
+        const data = await apiFetchJSON('/api/admin/users');
         const tbody = document.getElementById('adminUsersBody');
         const users = data.users || [];
         tbody.innerHTML = users.map(u => `
@@ -986,7 +1100,7 @@
           </tr>
         `).join('');
       } catch (err) {
-        console.error(err);
+        showToast(err.message, 'error');
       }
     }
     async function submitCreateUser(e) {
@@ -997,74 +1111,67 @@
       const password = document.getElementById('newPassword').value;
 
       try {
-        const res = await apiFetch('/api/admin/users', {
+        const data = await apiFetchJSON('/api/admin/users', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({ username, displayName, role, password })
         });
-        const data = await res.json();
-        if (!res.ok) {
-          alert('Gagal: ' + (data.error || res.statusText));
-          return;
-        }
-        alert(`Akun untuk ${data.user.displayName} berhasil dibuat!`);
+        showToast(`Akun untuk ${data.user.displayName} berhasil dibuat!`, 'success');
         document.getElementById('newUsername').value = '';
         document.getElementById('newDisplayName').value = '';
         document.getElementById('newPassword').value = '';
         toggleNewUserForm();
         loadAdminUsers();
       } catch (err) {
-        alert('Error: ' + err.message);
+        showToast(err.message, 'error');
       }
     }
     async function adminResetPassword(userId, username) {
       const newPassword = prompt(`Masukkan password baru untuk guru "${username}" (min 8 karakter):`);
       if (!newPassword) return;
       if (newPassword.length < 8) {
-        alert('Password baru minimal 8 karakter!');
+        showToast('Password baru minimal 8 karakter!', 'warning');
         return;
       }
       try {
-        const res = await apiFetch('/api/admin/users/reset-password', {
+        await apiFetchJSON('/api/admin/users/reset-password', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({ userId, newPassword })
         });
-        const data = await res.json();
-        if (!res.ok) { alert('Gagal: ' + (data.error || res.statusText)); return; }
-        alert(`Password untuk ${username} berhasil diperbarui!`);
-      } catch (err) { alert('Error: ' + err.message); }
+        showToast(`Password untuk ${username} berhasil diperbarui!`, 'success');
+      } catch (err) { showToast(err.message, 'error'); }
     }
     async function adminToggleActive(userId, username, currentStatus) {
       const nextStatus = !currentStatus;
       if (!confirm(`Apakah Anda yakin ingin ${nextStatus ? 'mengaktifkan' : 'menonaktifkan'} akun "${username}"?`)) return;
       try {
-        const res = await apiFetch('/api/admin/users/toggle-active', {
+        await apiFetchJSON('/api/admin/users/toggle-active', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({ userId, isActive: nextStatus })
         });
-        const data = await res.json();
-        if (!res.ok) { alert('Gagal: ' + (data.error || res.statusText)); return; }
+        showToast(`Akun "${username}" berhasil ${nextStatus ? 'diaktifkan' : 'dinonaktifkan'}.`, 'success');
         loadAdminUsers();
-      } catch (err) { alert('Error: ' + err.message); }
+      } catch (err) { showToast(err.message, 'error'); }
     }
     async function adminDeleteUser(userId, username) {
       if (!confirm(`Hapus akun "${username}" beserta seluruh datanya secara permanen?`)) return;
       try {
-        const res = await apiFetch('/api/admin/users/delete', {
+        await apiFetchJSON('/api/admin/users/delete', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({ userId })
         });
-        const data = await res.json();
-        if (!res.ok) { alert('Gagal: ' + (data.error || res.statusText)); return; }
+        showToast(`Akun "${username}" telah dihapus.`, 'success');
         loadAdminUsers();
-      } catch (err) { alert('Error: ' + err.message); }
+      } catch (err) { showToast(err.message, 'error'); }
     }
 
     async function logout() {
-      await fetch('/api/auth/logout', { method: 'POST' });
+      try {
+        await fetch('/api/auth/logout', { method: 'POST' });
+      } catch (e) {}
       window.location.href = '/login';
     }
 

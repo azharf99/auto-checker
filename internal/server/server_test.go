@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -187,5 +188,54 @@ func TestMultiUserServerAuthAndRBAC(t *testing.T) {
 	handler.ServeHTTP(recDeactivatedStatus, reqDeactivatedStatus)
 	if recDeactivatedStatus.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 for deactivated user session, got %d", recDeactivatedStatus.Code)
+	}
+}
+
+func TestServerPanicRecoveryAndResilientAPI(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "server_panic_test.db")
+	st, err := store.NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore failed: %v", err)
+	}
+	defer st.Close()
+
+	cfg := &config.Config{
+		BaseURL:       "https://lms.algonova.id",
+		CookieFile:    filepath.Join(t.TempDir(), "cookies.json"),
+		DBPath:        dbPath,
+		DashboardUser: "azharfa",
+		DashboardPass: "AdminSecret123!",
+	}
+
+	client, err := algonova.NewClient(cfg)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+
+	srv := NewServer(cfg, client, st)
+	defer srv.Close()
+
+	// Test panic middleware handling
+	panicHandler := srv.recoverMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		panic("simulated critical crash")
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/test-panic", nil)
+	rec := httptest.NewRecorder()
+	panicHandler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 on panic recovery, got %d", rec.Code)
+	}
+	ct := rec.Header().Get("Content-Type")
+	if !strings.Contains(ct, "application/json") {
+		t.Fatalf("expected application/json on recovered API error, got %s", ct)
+	}
+	var res map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("expected valid JSON error response, got: %s", rec.Body.String())
+	}
+	if res["error"] == nil {
+		t.Fatalf("expected error field in JSON response")
 	}
 }

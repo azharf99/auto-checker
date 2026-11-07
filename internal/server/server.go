@@ -4,10 +4,13 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"regexp"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -194,7 +197,25 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/admin/users/toggle-active", s.requireAdminAPI(s.handleAdminToggleActive))
 	mux.HandleFunc("POST /api/admin/users/delete", s.requireAdminAPI(s.handleAdminDeleteUser))
 
-	return s.securityMiddleware(mux)
+	return s.recoverMiddleware(s.securityMiddleware(mux))
+}
+
+func (s *Server) recoverMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Printf("[PANIC RECOVERED] path=%s error=%v\nStack: %s", r.URL.Path, rec, debug.Stack())
+				if strings.HasPrefix(r.URL.Path, "/api/") {
+					writeJSON(w, http.StatusInternalServerError, map[string]any{
+						"error": "Terjadi kesalahan internal pada server. Silakan coba kembali beberapa saat lagi.",
+					})
+				} else {
+					http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+				}
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) securityMiddleware(next http.Handler) http.Handler {
@@ -586,6 +607,9 @@ type scanRequest struct {
 }
 
 func (s *Server) handleScan(w http.ResponseWriter, r *http.Request, u *store.User) {
+	ctx, cancel := context.WithTimeout(r.Context(), 50*time.Second)
+	defer cancel()
+
 	var req scanRequest
 	if r.Body != nil {
 		_ = json.NewDecoder(r.Body).Decode(&req)
@@ -603,7 +627,7 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request, u *store.Use
 		return
 	}
 
-	if _, err := client.EnsureAuthenticated(r.Context()); err != nil {
+	if _, err := client.EnsureAuthenticated(ctx); err != nil {
 		s.addServerLog(u.ID, "Gagal autentikasi Algonova saat scan: %v", err)
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": err.Error()})
 		return
@@ -612,13 +636,20 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request, u *store.Use
 	gids := config.ParseGroupIDs(req.GroupIDs)
 	s.addServerLog(u.ID, "Memeriksa daftar tugas yang menunggu checklist...")
 
-	items, err := client.Discover(r.Context(), algonova.DiscoverOptions{
+	items, err := client.Discover(ctx, algonova.DiscoverOptions{
 		Mode:          req.Mode,
 		GroupIDs:      gids,
 		OnlyScheduled: req.OnlyScheduled,
 		Timeframe:     req.Timeframe,
 	})
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			s.addServerLog(u.ID, "Pemeriksaan tugas mendekati batas waktu (50 detik).")
+			writeJSON(w, http.StatusGatewayTimeout, map[string]any{
+				"error": "Waktu pemindaian melebihi batas (50s) karena banyaknya tugas murid atau server LMS sedang sibuk. Tugas tetap diproses di latar belakang oleh sistem otomatis.",
+			})
+			return
+		}
 		s.addServerLog(u.ID, "Scan error: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
@@ -645,6 +676,9 @@ type executeRequest struct {
 }
 
 func (s *Server) handleExecute(w http.ResponseWriter, r *http.Request, u *store.User) {
+	ctx, cancel := context.WithTimeout(r.Context(), 180*time.Second)
+	defer cancel()
+
 	var req executeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
@@ -678,7 +712,7 @@ func (s *Server) handleExecute(w http.ResponseWriter, r *http.Request, u *store.
 	}
 	s.addServerLog(u.ID, "Memulai %s untuk %d level...", modeLabel, len(targets))
 
-	results := client.CheckBatch(r.Context(), targets, req.DryRun, func(idx, total int, res algonova.CheckResult) {
+	results := client.CheckBatch(ctx, targets, req.DryRun, func(idx, total int, res algonova.CheckResult) {
 		if s.db != nil {
 			_ = s.db.AddUserExecutionHistory(u.ID, res)
 		}

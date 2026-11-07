@@ -143,23 +143,58 @@
       btn.textContent = 'Memverifikasi...';
 
       try {
-        const res = await fetch('/api/auth/login', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({
-            username: document.getElementById('username').value,
-            password: document.getElementById('password').value
-          })
-        });
-        const data = await res.json();
+        let res;
+        try {
+          res = await fetch('/api/auth/login', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'},
+            body: JSON.stringify({
+              username: document.getElementById('username').value.trim(),
+              password: document.getElementById('password').value
+            })
+          });
+        } catch (netErr) {
+          throw new Error('Gagal terhubung ke server. Periksa koneksi internet Anda atau coba beberapa saat lagi.');
+        }
+
+        const contentType = (res.headers.get('content-type') || '').toLowerCase();
+        let data = null;
+
+        if (contentType.includes('application/json')) {
+          try {
+            data = await res.json();
+          } catch (jsonErr) {
+            const raw = await res.text().catch(() => '');
+            throw new Error(`Format respons JSON tidak valid (Status ${res.status}): ${raw.slice(0, 100)}`);
+          }
+        } else {
+          const rawText = await res.text().catch(() => '');
+          if (rawText.includes('<html') || rawText.includes('<!DOCTYPE') || rawText.includes('<head')) {
+            const titleMatch = rawText.match(/<title[^>]*>([^<]+)<\/title>/i);
+            const pageTitle = titleMatch ? titleMatch[1].trim() : '';
+
+            if (res.status === 504 || rawText.toLowerCase().includes('gateway time-out')) {
+              throw new Error('Waktu permintaan habis (504 Gateway Timeout). Silakan coba lagi.');
+            } else if (res.status === 502 || rawText.toLowerCase().includes('502 bad gateway')) {
+              throw new Error('Koneksi server terputus sementara (502 Bad Gateway). Layanan sedang dimuat ulang.');
+            } else if (pageTitle) {
+              throw new Error(`Server mengembalikan respons [${pageTitle}]. Silakan coba lagi.`);
+            } else {
+              throw new Error(`Server mengembalikan format tidak valid (Status ${res.status}).`);
+            }
+          }
+          data = { error: rawText.trim() || `Error ${res.status} ${res.statusText}` };
+        }
+
         if (!res.ok) {
-          errBox.textContent = data.error || 'Login gagal';
+          errBox.textContent = (data && data.error) || 'Login gagal. Periksa kembali kredensial Anda.';
           errBox.style.display = 'block';
           return;
         }
+
         window.location.href = '/';
       } catch (err) {
-        errBox.textContent = 'Gagal menghubungi server: ' + err.message;
+        errBox.textContent = err.message;
         errBox.style.display = 'block';
       } finally {
         btn.disabled = false;

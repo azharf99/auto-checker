@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"math/rand/v2"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +21,27 @@ import (
 
 	"auto-checker/internal/config"
 )
+
+var (
+	reHTMLTitle       = regexp.MustCompile(`(?i)<title[^>]*>(.*?)</title>`)
+	ErrSessionExpired = errors.New("sesi Algonova telah berakhir (diarahkan ke halaman login)")
+)
+
+func extractHTMLTitle(b []byte) string {
+	m := reHTMLTitle.FindSubmatch(b)
+	if len(m) > 1 {
+		return strings.TrimSpace(html.UnescapeString(string(m[1])))
+	}
+	return ""
+}
+
+func extractReadableSnippet(b []byte) string {
+	s := strings.TrimSpace(string(b))
+	if len(s) > 200 {
+		return s[:200] + "..."
+	}
+	return s
+}
 
 // SavedCookie digunakan untuk menyimpan/memuat cookie dari file JSON lokal atau SQLite.
 type SavedCookie struct {
@@ -304,14 +327,21 @@ func (c *Client) GetUnreviewedCount(ctx context.Context) (int, error) {
 	return env.Data.Count, nil
 }
 
-// waitRateLimit menerapkan jeda antar-request ditambah random jitter (0-40%) agar trafik natural seperti manusia.
-func (c *Client) waitRateLimit(ctx context.Context) error {
-	baseDelay := c.cfg.RequestDelay
+// waitRateLimit menerapkan jeda antar-request ditambah random jitter agar trafik natural seperti manusia.
+// Untuk request GET (read-only), delay dibuat ringan (75ms) agar pemindaian cepat dan tidak memicu timeout proxy.
+// Untuk request POST (grading/write), delay menggunakan c.cfg.RequestDelay untuk melindungi akun dari rate limit Algonova.
+func (c *Client) waitRateLimit(ctx context.Context, isWrite bool) error {
+	var baseDelay time.Duration
+	if isWrite {
+		baseDelay = c.cfg.RequestDelay
+	} else {
+		baseDelay = 75 * time.Millisecond
+	}
 	if baseDelay <= 0 {
 		return nil
 	}
-	// Tambahkan jitter acak hingga +40% dari baseDelay
-	jitterMax := int64(baseDelay) * 40 / 100
+	// Tambahkan jitter acak hingga +30% dari baseDelay
+	jitterMax := int64(baseDelay) * 30 / 100
 	var jitter time.Duration
 	if jitterMax > 0 {
 		jitter = time.Duration(rand.Int64N(jitterMax))
@@ -405,11 +435,12 @@ func (c *Client) doRaw(ctx context.Context, method, pathOrURL string, body any, 
 		maxRetries = 0
 	}
 
+	isWrite := method != http.MethodGet && method != http.MethodHead
 	var lastBytes []byte
 	var lastStatus int
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		if err := c.waitRateLimit(ctx); err != nil {
+		if err := c.waitRateLimit(ctx, isWrite); err != nil {
 			return nil, 0, err
 		}
 
@@ -493,18 +524,25 @@ func (c *Client) doJSON(ctx context.Context, method, pathOrURL string, reqBody a
 		return err
 	}
 	if statusCode < 200 || statusCode >= 300 {
-		snippet := string(respBytes)
-		if len(snippet) > 240 {
-			snippet = snippet[:240] + "..."
-		}
+		snippet := extractReadableSnippet(respBytes)
 		return fmt.Errorf("HTTP %d from %s %s: %s", statusCode, method, pathOrURL, snippet)
 	}
 	if out != nil && len(respBytes) > 0 {
-		if err := json.Unmarshal(respBytes, out); err != nil {
-			snippet := string(respBytes)
-			if len(snippet) > 200 {
-				snippet = snippet[:200] + "..."
+		trimmed := bytes.TrimSpace(respBytes)
+		// Jika response mengembalikan HTML bukannya JSON
+		if bytes.HasPrefix(trimmed, []byte("<")) {
+			if bytes.Contains(trimmed, []byte("/auth/v3/login")) || bytes.Contains(trimmed, []byte("login-form")) {
+				return ErrSessionExpired
 			}
+			title := extractHTMLTitle(trimmed)
+			if title != "" {
+				return fmt.Errorf("Algonova mengembalikan halaman HTML [%s] bukannya JSON dari %s", title, pathOrURL)
+			}
+			return fmt.Errorf("Algonova mengembalikan HTML bukannya JSON dari %s: %s", pathOrURL, extractReadableSnippet(respBytes))
+		}
+
+		if err := json.Unmarshal(respBytes, out); err != nil {
+			snippet := extractReadableSnippet(respBytes)
 			return fmt.Errorf("decode JSON from %s: %w (body: %s)", pathOrURL, err, snippet)
 		}
 	}
